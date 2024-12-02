@@ -1,0 +1,1585 @@
+---
+title: "Cost-effectiveness of alternative approaches to hepatitis C diagnosis and treatment initiation for treatment-naive people who inject drugs in Australia"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+#Set options
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+
+#Load packages
+require(tidyverse)
+require(ggplot2)
+require(kableExtra)
+require(ggpubr)
+require(gridExtra)
+require(RColorBrewer)
+
+#Set seed
+set.seed(123)
+
+#Set number of iterations for PSA
+n_iter <- 1000
+
+#Set CE thresholds to be evaluated
+k <- seq(0,250000,100)
+
+#Set functions to format for printing
+format_cost <- function(x) case_when(is.nan(x) ~ "-",
+                                     TRUE ~ paste0("$",format(x,
+                                                              digits = 2,
+                                                              nsmall = 0,
+                                                              big.mark = ",",
+                                                              trim = TRUE,
+                                                              scientific = FALSE)))
+format_eff <- function(x) format(x, digits = 2, nsmall = 3, trim = TRUE)
+format_num <- function(x) format(x, digits = 2, nsmall = 0, big.mark = ",")
+format_strat <- function(x) case_match(x,
+                                       "s1.a" ~ "Lab Ab / Lab RNA (re-collection)",
+                                       "s1.b" ~ "Lab Ab / Lab RNA (reflex)",
+                                       "s1.c" ~ "Lab RNA",
+                                       "s2.a" ~ "PoC Ab / Lab RNA",
+                                       "s2.b" ~ "PoC Ab / Lab RNA / early Tx",
+                                       "s3.a" ~ "PoC Ab / PoC RNA",
+                                       "s3.b" ~ "PoC RNA",
+                                       "frontier_nmb" ~ "Net monetary benefit frontier")
+format_param <- function(x) case_match(x,
+                                        "p1" ~ "RNA prevalence",
+                                        "p2" ~ "Prob Ab present given absent RNA",
+                                        "p3" ~ "Sens PoC Ab",
+                                        "p4" ~ "Spec PoC Ab",
+                                        "p5" ~ "Sens lab Ab",
+                                        "p6" ~ "Spec lab Ab",
+                                        "p7" ~ "Sens PoC RNA",
+                                        "p8" ~ "Spec PoC RNA",
+                                        "p9" ~ "Prob invalid PoC RNA",
+                                        "p10" ~ "Sens lab RNA",
+                                        "p11" ~ "Spec lab RNA",
+                                        "p12" ~ "Prob lab RNA done given lab Ab+",
+                                        "p13" ~ "Prob lab RNA done given PoC Ab+",
+                                        "p14" ~ "Prob starts treatment given PoC Ab+",
+                                        "p15" ~ "Prob continues treatment given lab RNA+",
+                                        "p16" ~ "Prob PoC RNA done given PoC Ab+",
+                                        "p17" ~ "Prob starts treatment given PoC RNA+",
+                                        "p18" ~ "Prob lab RNA done given PoC RNA invalid",
+                                        "p19" ~ "Prob starts treatment given lab RNA+",
+                                        "p20" ~ "Prob complete treatment given treatment started",
+                                        "c1" ~ "Cost PoC Ab test",
+                                        "c2" ~ "Cost PoC RNA test",
+                                        "c3" ~ "Cost lab Ab test",
+                                        "c4" ~ "Cost lab RNA test",
+                                        "c5" ~ "Cost clinical assessment (excluding venepuncture)",
+                                        "c6" ~ "Cost venepuncture",
+                                        "c7" ~ "Cost treatment starter pack",
+                                        "c8" ~ "Cost incomplete treatment",
+                                        "c9" ~ "Cost complete treatment")
+format_costtype <- function(x) case_match(x,
+                                          "c_poc_ab" ~ "PoC antibody",
+                                          "c_poc_rna" ~ "PoC RNA",
+                                          "c_lab_ab" ~ "Lab antibody",
+                                          "c_lab_rna" ~ "Lab RNA",
+                                          "c_ass" ~ "Clinical assessment",
+                                          "c_vene" ~ "Venepuncture",
+                                          "c_tx" ~ "Treatment",
+                                          "c_initiation" ~ "Treatment initiation",
+                                          "c_completion" ~ "Treatment completion")
+format_costtype_simple <- function(x) case_match(x,
+                                          "c_poc_ab" ~ "Antibody testing",
+                                          "c_poc_rna" ~ "RNA testing",
+                                          "c_lab_ab" ~ "Antibody testing",
+                                          "c_lab_rna" ~ "RNA testing",
+                                          "c_ass" ~ "Clinical assessment",
+                                          "c_vene" ~ "Venepuncture",
+                                          "c_tx" ~ "Treatment",
+                                          "c_initiation" ~ "Treatment initiation",
+                                          "c_completion" ~ "Treatment completion")
+format_subgroup <- function(x) case_match(x,
+                                          "total" ~ "Overall",
+                                          "rna_neg" ~ "Non-viraemic",
+                                          "rna_pos_treated" ~ "Viraemic (fully treated)",
+                                          "rna_pos_ltfu" ~ "Viraemic (lost to follow-up)")
+
+#Set function to create tornado diagrams (credit: trinstansnowsill - https://gist.github.com/tristansnowsill/1906a578bdd19cffaa0919016b0a87f0)
+tornado_diagram <- function(res, outcome, base_case, show_values = c("none", "axis", "attached"), outcome_labeller = scales::label_number()) {
+  show_values <- match.arg(show_values)
+  
+  data_prep <- res |>
+    group_by(.param) |>
+    mutate(
+      .OUTCOME_DIFF  = {{outcome}} - base_case,
+      .OUTCOME_RANGE = max(c(base_case, {{outcome}})) - min(c(base_case, {{outcome}})),
+      .POSITION      = if_else(prod(sign(.OUTCOME_DIFF)) == 1, "dodge", "stack"),
+      .VALUE_FMT     = formatC(signif(.value, digits = 3), format = "f", drop0trailing = TRUE),
+      .LABELS        = if (show_values == "axis") paste0(.param, " [", .VALUE_FMT[.dir == "lower"], ", ", .VALUE_FMT[.dir == "upper"], "]") else .param
+    )
+  
+  shift_trans <- scales::trans_new(
+    name      = "shift",
+    transform = function(x) x - base_case,
+    inverse   = function(x) x + base_case
+  )
+  
+  p <- ggplot(
+    data_prep,
+    aes(
+      x    = fct_reorder(.LABELS, .OUTCOME_RANGE), # Show in order of importance
+      y    = {{outcome}},
+      fill = .dir)
+  ) +
+    geom_blank() + # Necessary to preserve the order of parameters
+    geom_col(
+      data     = ~ filter(., .POSITION == "dodge"),
+      position = "dodge"
+    ) +
+    geom_col(
+      data     = ~ filter(., .POSITION == "stack"),
+      position = "stack"
+    ) +
+    scale_y_continuous(trans = shift_trans, labels = outcome_labeller) +
+    labs(x = "Parameter", y = "Outcome") +
+    coord_flip()
+  
+  if (show_values == "attached")
+    p +
+      geom_text(
+        aes(label = .VALUE_FMT)
+      )
+  else
+    p
+  
+}
+
+# Function to extract ggplot legend
+g_legend <- function(a.gplot){ 
+    tmp <- ggplot_gtable(ggplot_build(a.gplot)) 
+    leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box") 
+    legend <- tmp$grobs[[leg]] 
+    legend
+} 
+
+#Custom theme for plots:
+theme_c <-   theme(panel.background = element_blank(),
+        panel.border = element_rect(fill = NA),
+        panel.grid = element_line(colour = "grey", linetype = "dashed"),
+        legend.position = "bottom",
+        legend.title=element_blank())
+
+#Set consistent colour scheme for strategies across plots
+strats <- factor(c("Lab Ab / Lab RNA (re-collection)",
+                    "Lab Ab / Lab RNA (reflex)",
+                    "Lab RNA",
+                    "PoC Ab / Lab RNA",
+                    "PoC Ab / Lab RNA / early Tx",
+                    "PoC Ab / PoC RNA",
+                    "PoC RNA",
+                    "Net monetary benefit frontier"))
+myColors <- brewer.pal(length(strats),"Dark2")
+names(myColors) <- levels(strats)
+colScale <- scale_colour_manual(name = "grp",values = myColors)
+fillScale <- scale_fill_manual(name = "grp",values = myColors)
+```
+
+```{r setup_model}
+#Define the model
+model <- function(x) {
+
+tree <- tribble(~strat, ~rna_status, ~ab_status, ~outcome_status , ~exp_p                                                                 , ~c_poc_ab, ~c_poc_rna, ~c_lab_ab, ~c_lab_rna, ~c_ass, ~c_vene, ~c_tx,
+               "s1.a", "rna-"     , "ab-"     , "fully_treated"  , (1-x$p1)*(1-x$p2)*(1-x$p6)*x$p12*(1-x$p11)*x$p19*x$p20                 , NA       , NA        , x$c3     , x$c4      , x$c5  , 3*x$c6 , x$c9,
+               "s1.a", "rna-"     , "ab-"     , "partly_treated" , (1-x$p1)*(1-x$p2)*(1-x$p6)*x$p12*(1-x$p11)*x$p19*(1-x$p20)             , NA       , NA        , x$c3     , x$c4      , x$c5  , 3*x$c6 , x$c8,
+               "s1.a", "rna-"     , "ab-"     , "ltfu"           , (1-x$p1)*(1-x$p2)*(1-x$p6)*x$p12*(1-x$p11)*(1-x$p19)                   , NA       , NA        , x$c3     , x$c4      , NA    , 2*x$c6 , NA,
+               "s1.a", "rna-"     , "ab-"     , "test_neg"       , (1-x$p1)*(1-x$p2)*(1-x$p6)*x$p12*x$p11                                 , NA       , NA        , x$c3     , x$c4      , NA    , 2*x$c6 , NA,
+               "s1.a", "rna-"     , "ab-"     , "ltfu"           , (1-x$p1)*(1-x$p2)*(1-x$p6)*(1-x$p12)                                   , NA       , NA        , x$c3     , NA        , NA    ,   x$c6 , NA,
+               "s1.a", "rna-"     , "ab-"     , "test_neg"       , (1-x$p1)*(1-x$p2)*x$p6                                                 , NA       , NA        , x$c3     , NA        , NA    ,   x$c6 , NA,
+
+               "s1.a", "rna-"     , "ab+"     , "fully_treated"  , (1-x$p1)*x$p2*x$p5*x$p12*(1-x$p11)*x$p19*x$p20                         , NA       , NA        , x$c3     , x$c4      , x$c5  , 3*x$c6 , x$c9,
+               "s1.a", "rna-"     , "ab+"     , "partly_treated" , (1-x$p1)*x$p2*x$p5*x$p12*(1-x$p11)*x$p19*(1-x$p20)                     , NA       , NA        , x$c3     , x$c4      , x$c5  , 3*x$c6 , x$c8,
+               "s1.a", "rna-"     , "ab+"     , "ltfu"           , (1-x$p1)*x$p2*x$p5*x$p12*(1-x$p11)*(1-x$p19)                           , NA       , NA        , x$c3     , x$c4      , NA    , 2*x$c6 , NA,
+               "s1.a", "rna-"     , "ab+"     , "test_neg"       , (1-x$p1)*x$p2*x$p5*x$p12*x$p11                                         , NA       , NA        , x$c3     , x$c4      , NA    , 2*x$c6 , NA,
+               "s1.a", "rna-"     , "ab+"     , "ltfu"           , (1-x$p1)*x$p2*x$p5*(1-x$p12)                                           , NA       , NA        , x$c3     , NA        , NA    ,   x$c6 , NA,
+               "s1.a", "rna-"     , "ab+"     , "test_neg"       , (1-x$p1)*x$p2*(1-x$p5)                                                 , NA       , NA        , x$c3     , NA        , NA    ,   x$c6 , NA,
+
+               "s1.a", "rna+"     , "ab+"     , "fully_treated"  , x$p1*x$p5*x$p12*x$p10*x$p19*x$p20                                      , NA       , NA        , x$c3     , x$c4      , x$c5  , 3*x$c6 , x$c9,
+               "s1.a", "rna+"     , "ab+"     , "partly_treated" , x$p1*x$p5*x$p12*x$p10*x$p19*(1-x$p20)                                  , NA       , NA        , x$c3     , x$c4      , x$c5  , 3*x$c6 , x$c8,
+               "s1.a", "rna+"     , "ab+"     , "ltfu"           , x$p1*x$p5*x$p12*x$p10*(1-x$p19)                                        , NA       , NA        , x$c3     , x$c4      , NA    , 2*x$c6 , NA,
+               "s1.a", "rna+"     , "ab+"     , "test_neg"       , x$p1*x$p5*x$p12*(1-x$p10)                                              , NA       , NA        , x$c3     , x$c4      , NA    , 2*x$c6 , NA,
+               "s1.a", "rna+"     , "ab+"     , "ltfu"           , x$p1*x$p5*(1-x$p12)                                                    , NA       , NA        , x$c3     , NA        , NA    ,   x$c6 , NA,
+               "s1.a", "rna+"     , "ab+"     , "test_neg"       , x$p1*(1-x$p5)                                                          , NA       , NA        , x$c3     , NA        , NA    ,   x$c6 , NA,
+               
+               
+               "s1.b", "rna-"     , "ab-"     , "fully_treated"  , (1-x$p1)*(1-x$p2)*(1-x$p6)*(1-x$p11)*x$p19*x$p20                       , NA       , NA        , x$c3     , x$c4      , x$c5  , 2*x$c6 , x$c9,
+               "s1.b", "rna-"     , "ab-"     , "partly_treated" , (1-x$p1)*(1-x$p2)*(1-x$p6)*(1-x$p11)*x$p19*(1-x$p20)                   , NA       , NA        , x$c3     , x$c4      , x$c5  , 2*x$c6 , x$c8,
+               "s1.b", "rna-"     , "ab-"     , "ltfu"           , (1-x$p1)*(1-x$p2)*(1-x$p6)*(1-x$p11)*(1-x$p19)                         , NA       , NA        , x$c3     , x$c4      , NA    ,   x$c6 , NA,
+               "s1.b", "rna-"     , "ab-"     , "test_neg"       , (1-x$p1)*(1-x$p2)*(1-x$p6)*x$p11                                       , NA       , NA        , x$c3     , x$c4      , NA    ,   x$c6 , NA,
+               "s1.b", "rna-"     , "ab-"     , "test_neg"       , (1-x$p1)*(1-x$p2)*x$p6                                                 , NA       , NA        , x$c3     , NA        , NA    ,   x$c6 , NA,
+               
+               "s1.b", "rna-"     , "ab+"     , "fully_treated"  , (1-x$p1)*x$p2*x$p5*(1-x$p11)*x$p19*x$p20                               , NA       , NA        , x$c3     , x$c4      , x$c5  , 2*x$c6 , x$c9,
+               "s1.b", "rna-"     , "ab+"     , "partly_treated" , (1-x$p1)*x$p2*x$p5*(1-x$p11)*x$p19*(1-x$p20)                           , NA       , NA        , x$c3     , x$c4      , x$c5  , 2*x$c6 , x$c8,
+               "s1.b", "rna-"     , "ab+"     , "ltfu"           , (1-x$p1)*x$p2*x$p5*(1-x$p11)*(1-x$p19)                                 , NA       , NA        , x$c3     , x$c4      , NA    ,   x$c6 , NA,
+               "s1.b", "rna-"     , "ab+"     , "test_neg"       , (1-x$p1)*x$p2*x$p5*x$p11                                               , NA       , NA        , x$c3     , x$c4      , NA    ,   x$c6 , NA,
+               "s1.b", "rna-"     , "ab+"     , "test_neg"       , (1-x$p1)*x$p2*(1-x$p5)                                                 , NA       , NA        , x$c3     , NA        , NA    ,   x$c6 , NA,
+
+               "s1.b", "rna+"     , "ab+"     , "fully_treated"  , x$p1*x$p5*x$p10*x$p19*x$p20                                            , NA       , NA        , x$c3     , x$c4      , x$c5  , 2*x$c6 , x$c9,
+               "s1.b", "rna+"     , "ab+"     , "partly_treated" , x$p1*x$p5*x$p10*x$p19*(1-x$p20)                                        , NA       , NA        , x$c3     , x$c4      , x$c5  , 2*x$c6 , x$c8,
+               "s1.b", "rna+"     , "ab+"     , "ltfu"           , x$p1*x$p5*x$p10*(1-x$p19)                                              , NA       , NA        , x$c3     , x$c4      , NA    ,   x$c6 , NA,
+               "s1.b", "rna+"     , "ab+"     , "test_neg"       , x$p1*x$p5*(1-x$p10)                                                    , NA       , NA        , x$c3     , x$c4      , NA    ,   x$c6 , NA,
+               "s1.b", "rna+"     , "ab+"     , "test_neg"       , x$p1*(1-x$p5)                                                          , NA       , NA        , x$c3     , NA        , NA    ,   x$c6 , NA,
+               
+               
+               "s1.c", "rna-"     , "ab-"     , "fully_treated"  , (1-x$p1)*(1-x$p2)*(1-x$p11)*x$p19*x$p20                                , NA       , NA        , NA       , x$c4      , x$c5  , 2*x$c6 , x$c9,
+               "s1.c", "rna-"     , "ab-"     , "partly_treated" , (1-x$p1)*(1-x$p2)*(1-x$p11)*x$p19*(1-x$p20)                            , NA       , NA        , NA       , x$c4      , x$c5  , 2*x$c6 , x$c8,
+               "s1.c", "rna-"     , "ab-"     , "ltfu"           , (1-x$p1)*(1-x$p2)*(1-x$p11)*(1-x$p19)                                  , NA       , NA        , NA       , x$c4      , NA    ,   x$c6 , NA,
+               "s1.c", "rna-"     , "ab-"     , "test_neg"       , (1-x$p1)*(1-x$p2)*x$p11                                                , NA       , NA        , NA       , x$c4      , NA    ,   x$c6 , NA,
+               
+               "s1.c", "rna-"     , "ab+"     , "fully_treated"  , (1-x$p1)*x$p2*(1-x$p11)*x$p19*x$p20                                    , NA       , NA        , NA       , x$c4      , x$c5  , 2*x$c6 , x$c9,
+               "s1.c", "rna-"     , "ab+"     , "partly_treated" , (1-x$p1)*x$p2*(1-x$p11)*x$p19*(1-x$p20)                                , NA       , NA        , NA       , x$c4      , x$c5  , 2*x$c6 , x$c8,
+               "s1.c", "rna-"     , "ab+"     , "ltfu"           , (1-x$p1)*x$p2*(1-x$p11)*(1-x$p19)                                      , NA       , NA        , NA       , x$c4      , NA    ,   x$c6 , NA,
+               "s1.c", "rna-"     , "ab+"     , "test_neg"       , (1-x$p1)*x$p2*x$p11                                                    , NA       , NA        , NA       , x$c4      , NA    ,   x$c6 , NA,
+
+               "s1.c", "rna+"     , "ab+"     , "fully_treated"  , x$p1*x$p10*x$p19*x$p20                                                 , NA       , NA        , NA       , x$c4      , x$c5  , 2*x$c6 , x$c9,
+               "s1.c", "rna+"     , "ab+"     , "partly_treated" , x$p1*x$p10*x$p19*(1-x$p20)                                             , NA       , NA        , NA       , x$c4      , x$c5  , 2*x$c6 , x$c8,
+               "s1.c", "rna+"     , "ab+"     , "ltfu"           , x$p1*x$p10*(1-x$p19)                                                   , NA       , NA        , NA       , x$c4      , NA    ,   x$c6 , NA,
+               "s1.c", "rna+"     , "ab+"     , "test_neg"       , x$p1*(1-x$p10)                                                         , NA       , NA        , NA       , x$c4      , NA    ,   x$c6 , NA,
+            
+               
+               "s2.a", "rna-"     , "ab-"     , "fully_treated"  , (1-x$p1)*(1-x$p2)*(1-x$p4)*x$p13*(1-x$p11)*x$p19*x$p20                 , x$c1     , NA        , NA       , x$c4      , x$c5  , 2*x$c6 , x$c9,
+               "s2.a", "rna-"     , "ab-"     , "partly_treated" , (1-x$p1)*(1-x$p2)*(1-x$p4)*x$p13*(1-x$p11)*x$p19*(1-x$p20)             , x$c1     , NA        , NA       , x$c4      , x$c5  , 2*x$c6 , x$c8,
+               "s2.a", "rna-"     , "ab-"     , "ltfu"           , (1-x$p1)*(1-x$p2)*(1-x$p4)*x$p13*(1-x$p11)*(1-x$p19)                   , x$c1     , NA        , NA       , x$c4      , NA    , x$c6   , NA,
+               "s2.a", "rna-"     , "ab-"     , "test_neg"       , (1-x$p1)*(1-x$p2)*(1-x$p4)*x$p13*x$p11                                 , x$c1     , NA        , NA       , x$c4      , NA    , x$c6   , NA,
+               "s2.a", "rna-"     , "ab-"     , "ltfu"           , (1-x$p1)*(1-x$p2)*(1-x$p4)*(1-x$p13)                                   , x$c1     , NA        , NA       , NA        , NA    , NA     , NA,
+               "s2.a", "rna-"     , "ab-"     , "test_neg"       , (1-x$p1)*(1-x$p2)*x$p4                                                 , x$c1     , NA        , NA       , NA        , NA    , NA     , NA,
+               
+               "s2.a", "rna-"     , "ab+"     , "fully_treated"  , (1-x$p1)*x$p2*x$p3*x$p13*(1-x$p11)*x$p19*x$p20                         , x$c1     , NA        , NA       , x$c4      , x$c5  , 2*x$c6 , x$c9,
+               "s2.a", "rna-"     , "ab+"     , "partly_treated" , (1-x$p1)*x$p2*x$p3*x$p13*(1-x$p11)*x$p19*(1-x$p20)                     , x$c1     , NA        , NA       , x$c4      , x$c5  , 2*x$c6 , x$c8,
+               "s2.a", "rna-"     , "ab+"     , "ltfu"           , (1-x$p1)*x$p2*x$p3*x$p13*(1-x$p11)*(1-x$p19)                           , x$c1     , NA        , NA       , x$c4      , NA    , x$c6   , NA,
+               "s2.a", "rna-"     , "ab+"     , "test_neg"       , (1-x$p1)*x$p2*x$p3*x$p13*x$p11                                         , x$c1     , NA        , NA       , x$c4      , NA    , x$c6   , NA,
+               "s2.a", "rna-"     , "ab+"     , "ltfu"           , (1-x$p1)*x$p2*x$p3*(1-x$p13)                                           , x$c1     , NA        , NA       , NA        , NA    , NA     , NA,
+               "s2.a", "rna-"     , "ab+"     , "test_neg"       , (1-x$p1)*x$p2*(1-x$p3)                                                 , x$c1     , NA        , NA       , NA        , NA    , NA     , NA,
+
+               "s2.a", "rna+"     , "ab+"     , "fully_treated"  , x$p1*x$p3*x$p13*x$p10*x$p19*x$p20                                      , x$c1     , NA        , NA       , x$c4      , x$c5  , 2*x$c6 , x$c9,
+               "s2.a", "rna+"     , "ab+"     , "partly_treated" , x$p1*x$p3*x$p13*x$p10*x$p19*(1-x$p20)                                  , x$c1     , NA        , NA       , x$c4      , x$c5  , 2*x$c6 , x$c8,
+               "s2.a", "rna+"     , "ab+"     , "ltfu"           , x$p1*x$p3*x$p13*x$p10*(1-x$p19)                                        , x$c1     , NA        , NA       , x$c4      , NA    , x$c6   , NA,
+               "s2.a", "rna+"     , "ab+"     , "test_neg"       , x$p1*x$p3*x$p13*(1-x$p10)                                              , x$c1     , NA        , NA       , x$c4      , NA    , x$c6   , NA,
+               "s2.a", "rna+"     , "ab+"     , "ltfu"           , x$p1*x$p3*(1-x$p13)                                                    , x$c1     , NA        , NA       , NA        , NA    , NA     , NA,
+               "s2.a", "rna+"     , "ab+"     , "test_neg"       , x$p1*(1-x$p3)                                                          , x$c1     , NA        , NA       , NA        , NA    , NA     , NA,
+
+               
+               "s2.b", "rna-"     , "ab-"     , "fully_treated"  , (1-x$p1)*(1-x$p2)*(1-x$p4)*x$p14*(1-x$p11)*x$p15*x$p20                 , x$c1     , NA        , NA       , x$c4      , x$c5  , x$c6   , x$c9,
+               "s2.b", "rna-"     , "ab-"     , "partly_treated" , (1-x$p1)*(1-x$p2)*(1-x$p4)*x$p14*(1-x$p11)*x$p15*(1-x$p20)             , x$c1     , NA        , NA       , x$c4      , x$c5  , x$c6   , x$c8,
+               "s2.b", "rna-"     , "ab-"     , "q_tx_ltfu"      , (1-x$p1)*(1-x$p2)*(1-x$p4)*x$p14*(1-x$p11)*(1-x$p15)                   , x$c1     , NA        , NA       , x$c4      , x$c5  , x$c6   , x$c7,
+               "s2.b", "rna-"     , "ab-"     , "q_tx_test_neg"  , (1-x$p1)*(1-x$p2)*(1-x$p4)*x$p14*x$p11                                 , x$c1     , NA        , NA       , x$c4      , x$c5  , x$c6   , x$c7,
+               "s2.b", "rna-"     , "ab-"     , "ltfu"           , (1-x$p1)*(1-x$p2)*(1-x$p4)*(1-x$p14)                                   , x$c1     , NA        , NA       , NA        , NA    , NA     , NA,
+               "s2.b", "rna-"     , "ab-"     , "test_neg"       , (1-x$p1)*(1-x$p2)*x$p4                                                 , x$c1     , NA        , NA       , NA        , NA    , NA     , NA,
+               
+               "s2.b", "rna-"     , "ab+"     , "fully_treated"  , (1-x$p1)*x$p2*x$p3*x$p14*(1-x$p11)*x$p15*x$p20                         , x$c1     , NA        , NA       , x$c4      , x$c5  , x$c6   , x$c9,
+               "s2.b", "rna-"     , "ab+"     , "partly_treated" , (1-x$p1)*x$p2*x$p3*x$p14*(1-x$p11)*x$p15*(1-x$p20)                     , x$c1     , NA        , NA       , x$c4      , x$c5  , x$c6   , x$c8,
+               "s2.b", "rna-"     , "ab+"     , "q_tx_ltfu"      , (1-x$p1)*x$p2*x$p3*x$p14*(1-x$p11)*(1-x$p15)                           , x$c1     , NA        , NA       , x$c4      , x$c5  , x$c6   , x$c7,
+               "s2.b", "rna-"     , "ab+"     , "q_tx_test_neg"  , (1-x$p1)*x$p2*x$p3*x$p14*x$p11                                         , x$c1     , NA        , NA       , x$c4      , x$c5  , x$c6   , x$c7,
+               "s2.b", "rna-"     , "ab+"     , "ltfu"           , (1-x$p1)*x$p2*x$p3*(1-x$p14)                                           , x$c1     , NA        , NA       , NA        , NA    , NA     , NA,
+               "s2.b", "rna-"     , "ab+"     , "test_neg"       , (1-x$p1)*x$p2*(1-x$p3)                                                 , x$c1     , NA        , NA       , NA        , NA    , NA     , NA,
+            
+               "s2.b", "rna+"     , "ab+"     , "fully_treated"  , x$p1*x$p3*x$p14*x$p10*x$p15*x$p20                                      , x$c1     , NA        , NA       , x$c4      , x$c5  , x$c6   , x$c9,
+               "s2.b", "rna+"     , "ab+"     , "partly_treated" , x$p1*x$p3*x$p14*x$p10*x$p15*(1-x$p20)                                  , x$c1     , NA        , NA       , x$c4      , x$c5  , x$c6   , x$c8,
+               "s2.b", "rna+"     , "ab+"     , "q_tx_ltfu"      , x$p1*x$p3*x$p14*x$p10*(1-x$p15)                                        , x$c1     , NA        , NA       , x$c4      , x$c5  , x$c6   , x$c7,
+               "s2.b", "rna+"     , "ab+"     , "q_tx_test_neg"  , x$p1*x$p3*x$p14*(1-x$p10)                                              , x$c1     , NA        , NA       , x$c4      , x$c5  , x$c6   , x$c7,
+               "s2.b", "rna+"     , "ab+"     , "ltfu"           , x$p1*x$p3*(1-x$p14)                                                    , x$c1     , NA        , NA       , NA        , NA    , NA     , NA,
+               "s2.b", "rna+"     , "ab+"     , "test_neg"       , x$p1*(1-x$p3)                                                          , x$c1     , NA        , NA       , NA        , NA    , NA     , NA,
+
+
+               "s3.a", "rna-"     , "ab-"     , "fully_treated"  , (1-x$p1)*(1-x$p2)*(1-x$p4)*x$p16*(1-x$p9)*(1-x$p8)*x$p17*x$p20         , x$c1     , x$c2      , NA       , NA        , x$c5  , x$c6   , x$c9,
+               "s3.a", "rna-"     , "ab-"     , "partly_treated" , (1-x$p1)*(1-x$p2)*(1-x$p4)*x$p16*(1-x$p9)*(1-x$p8)*x$p17*(1-x$p20)     , x$c1     , x$c2      , NA       , NA        , x$c5  , x$c6   , x$c8,
+               "s3.a", "rna-"     , "ab-"     , "ltfu"           , (1-x$p1)*(1-x$p2)*(1-x$p4)*x$p16*(1-x$p9)*(1-x$p8)*(1-x$p17)           , x$c1     , x$c2      , NA       , NA        , NA    , NA     , NA,
+               "s3.a", "rna-"     , "ab-"     , "test_neg"       , (1-x$p1)*(1-x$p2)*(1-x$p4)*x$p16*(1-x$p9)*x$p8                         , x$c1     , x$c2      , NA       , NA        , NA    , NA     , NA,
+               "s3.a", "rna-"     , "ab-"     , "fully_treated"  , (1-x$p1)*(1-x$p2)*(1-x$p4)*x$p16*x$p9*x$p18*(1-x$p11)*x$p19*x$p20      , x$c1     , x$c2      , NA       , x$c4      , x$c5  , 2*x$c6 , x$c9,
+               "s3.a", "rna-"     , "ab-"     , "partly_treated" , (1-x$p1)*(1-x$p2)*(1-x$p4)*x$p16*x$p9*x$p18*(1-x$p11)*x$p19*(1-x$p20)  , x$c1     , x$c2      , NA       , x$c4      , x$c5  , 2*x$c6 , x$c8,
+               "s3.a", "rna-"     , "ab-"     , "ltfu"           , (1-x$p1)*(1-x$p2)*(1-x$p4)*x$p16*x$p9*x$p18*(1-x$p11)*(1-x$p19)        , x$c1     , x$c2      , NA       , x$c4      , NA    , x$c6   , NA,
+               "s3.a", "rna-"     , "ab-"     , "test_neg"       , (1-x$p1)*(1-x$p2)*(1-x$p4)*x$p16*x$p9*x$p18*x$p11                      , x$c1     , x$c2      , NA       , x$c4      , NA    , x$c6   , NA,
+               "s3.a", "rna-"     , "ab-"     , "ltfu"           , (1-x$p1)*(1-x$p2)*(1-x$p4)*x$p16*x$p9*(1-x$p18)                        , x$c1     , x$c2      , NA       , NA        , NA    , NA     , NA,
+               "s3.a", "rna-"     , "ab-"     , "ltfu"           , (1-x$p1)*(1-x$p2)*(1-x$p4)*(1-x$p16)                                   , x$c1     , NA        , NA       , NA        , NA    , NA     , NA,
+               "s3.a", "rna-"     , "ab-"     , "test_neg"       , (1-x$p1)*(1-x$p2)*x$p4                                                 , x$c1     , NA        , NA       , NA        , NA    , NA     , NA,
+
+               "s3.a", "rna-"     , "ab+"     , "fully_treated"  , (1-x$p1)*x$p2*x$p3*x$p16*(1-x$p9)*(1-x$p8)*x$p17*x$p20                 , x$c1     , x$c2      , NA       , NA        , x$c5  , x$c6   , x$c9,
+               "s3.a", "rna-"     , "ab+"     , "partly_treated" , (1-x$p1)*x$p2*x$p3*x$p16*(1-x$p9)*(1-x$p8)*x$p17*(1-x$p20)             , x$c1     , x$c2      , NA       , NA        , x$c5  , x$c6   , x$c8,
+               "s3.a", "rna-"     , "ab+"     , "ltfu"           , (1-x$p1)*x$p2*x$p3*x$p16*(1-x$p9)*(1-x$p8)*(1-x$p17)                   , x$c1     , x$c2      , NA       , NA        , NA    , NA     , NA,
+               "s3.a", "rna-"     , "ab+"     , "test_neg"       , (1-x$p1)*x$p2*x$p3*x$p16*(1-x$p9)*x$p8                                 , x$c1     , x$c2      , NA       , NA        , NA    , NA     , NA,
+               "s3.a", "rna-"     , "ab+"     , "fully_treated"  , (1-x$p1)*x$p2*x$p3*x$p16*x$p9*x$p18*(1-x$p11)*x$p19*x$p20              , x$c1     , x$c2      , NA       , x$c4      , x$c5  , 2*x$c6 , x$c9,
+               "s3.a", "rna-"     , "ab+"     , "partly_treated" , (1-x$p1)*x$p2*x$p3*x$p16*x$p9*x$p18*(1-x$p11)*x$p19*(1-x$p20)          , x$c1     , x$c2      , NA       , x$c4      , x$c5  , 2*x$c6 , x$c8,
+               "s3.a", "rna-"     , "ab+"     , "ltfu"           , (1-x$p1)*x$p2*x$p3*x$p16*x$p9*x$p18*(1-x$p11)*(1-x$p19)                , x$c1     , x$c2      , NA       , x$c4      , NA    , x$c6   , NA,
+               "s3.a", "rna-"     , "ab+"     , "test_neg"       , (1-x$p1)*x$p2*x$p3*x$p16*x$p9*x$p18*x$p11                              , x$c1     , x$c2      , NA       , x$c4      , NA    , x$c6   , NA,
+               "s3.a", "rna-"     , "ab+"     , "ltfu"           , (1-x$p1)*x$p2*x$p3*x$p16*x$p9*(1-x$p18)                                , x$c1     , x$c2      , NA       , NA        , NA    , NA     , NA,
+               "s3.a", "rna-"     , "ab+"     , "ltfu"           , (1-x$p1)*x$p2*x$p3*(1-x$p16)                                           , x$c1     , NA        , NA       , NA        , NA    , NA     , NA,
+               "s3.a", "rna-"     , "ab+"     , "test_neg"       , (1-x$p1)*x$p2*(1-x$p3)                                                 , x$c1     , NA        , NA       , NA        , NA    , NA     , NA,
+
+               "s3.a", "rna+"     , "ab+"     , "fully_treated"  , x$p1*x$p3*x$p16*(1-x$p9)*x$p7*x$p17*x$p20                              , x$c1     , x$c2      , NA       , NA        , x$c5  , x$c6   , x$c9,
+               "s3.a", "rna+"     , "ab+"     , "partly_treated" , x$p1*x$p3*x$p16*(1-x$p9)*x$p7*x$p17*(1-x$p20)                          , x$c1     , x$c2      , NA       , NA        , x$c5  , x$c6   , x$c8,
+               "s3.a", "rna+"     , "ab+"     , "ltfu"           , x$p1*x$p3*x$p16*(1-x$p9)*x$p7*(1-x$p17)                                , x$c1     , x$c2      , NA       , NA        , NA    , NA     , NA,
+               "s3.a", "rna+"     , "ab+"     , "test_neg"       , x$p1*x$p3*x$p16*(1-x$p9)*(1-x$p7)                                      , x$c1     , x$c2      , NA       , NA        , NA    , NA     , NA,
+               "s3.a", "rna+"     , "ab+"     , "fully_treated"  , x$p1*x$p3*x$p16*x$p9*x$p18*x$p10*x$p19*x$p20                           , x$c1     , x$c2      , NA       , x$c4      , x$c5  , 2*x$c6 , x$c9,
+               "s3.a", "rna+"     , "ab+"     , "partly_treated" , x$p1*x$p3*x$p16*x$p9*x$p18*x$p10*x$p19*(1-x$p20)                       , x$c1     , x$c2      , NA       , x$c4      , x$c5  , 2*x$c6 , x$c8,
+               "s3.a", "rna+"     , "ab+"     , "ltfu"           , x$p1*x$p3*x$p16*x$p9*x$p18*x$p10*(1-x$p19)                             , x$c1     , x$c2      , NA       , x$c4      , NA    , x$c6   , NA,
+               "s3.a", "rna+"     , "ab+"     , "test_neg"       , x$p1*x$p3*x$p16*x$p9*x$p18*(1-x$p10)                                   , x$c1     , x$c2      , NA       , x$c4      , NA    , x$c6   , NA,
+               "s3.a", "rna+"     , "ab+"     , "ltfu"           , x$p1*x$p3*x$p16*x$p9*(1-x$p18)                                         , x$c1     , x$c2      , NA       , NA        , NA    , NA     , NA,
+               "s3.a", "rna+"     , "ab+"     , "ltfu"           , x$p1*x$p3*(1-x$p16)                                                    , x$c1     , NA        , NA       , NA        , NA    , NA     , NA,
+               "s3.a", "rna+"     , "ab+"     , "test_neg"       , x$p1*(1-x$p3)                                                          , x$c1     , NA        , NA       , NA        , NA    , NA     , NA,
+
+               
+               "s3.b", "rna-"     , "ab-"     , "fully_treated"  , (1-x$p1)*(1-x$p2)*(1-x$p9)*(1-x$p8)*x$p17*x$p20                        , NA       , x$c2      , NA       , NA        , x$c5  , x$c6   , x$c9,
+               "s3.b", "rna-"     , "ab-"     , "partly_treated" , (1-x$p1)*(1-x$p2)*(1-x$p9)*(1-x$p8)*x$p17*(1-x$p20)                    , NA       , x$c2      , NA       , NA        , x$c5  , x$c6   , x$c8,
+               "s3.b", "rna-"     , "ab-"     , "ltfu"           , (1-x$p1)*(1-x$p2)*(1-x$p9)*(1-x$p8)*(1-x$p17)                          , NA       , x$c2      , NA       , NA        , NA    , NA     , NA,
+               "s3.b", "rna-"     , "ab-"     , "test_neg"       , (1-x$p1)*(1-x$p2)*(1-x$p9)*x$p8                                        , NA       , x$c2      , NA       , NA        , NA    , NA     , NA,
+               "s3.b", "rna-"     , "ab-"     , "fully_treated"  , (1-x$p1)*(1-x$p2)*x$p9*x$p18*(1-x$p11)*x$p19*x$p20                     , NA       , x$c2      , NA       , x$c4      , x$c5  , 2*x$c6 , x$c9,
+               "s3.b", "rna-"     , "ab-"     , "partly_treated" , (1-x$p1)*(1-x$p2)*x$p9*x$p18*(1-x$p11)*x$p19*(1-x$p20)                 , NA       , x$c2      , NA       , x$c4      , x$c5  , 2*x$c6 , x$c8,
+               "s3.b", "rna-"     , "ab-"     , "ltfu"           , (1-x$p1)*(1-x$p2)*x$p9*x$p18*(1-x$p11)*(1-x$p19)                       , NA       , x$c2      , NA       , x$c4      , NA    , x$c6   , NA,
+               "s3.b", "rna-"     , "ab-"     , "test_neg"       , (1-x$p1)*(1-x$p2)*x$p9*x$p18*x$p11                                     , NA       , x$c2      , NA       , x$c4      , NA    , x$c6   , NA,
+               "s3.b", "rna-"     , "ab-"     , "ltfu"           , (1-x$p1)*(1-x$p2)*x$p9*(1-x$p18)                                       , NA       , x$c2      , NA       , NA        , NA    , NA     , NA,
+
+               "s3.b", "rna-"     , "ab+"     , "fully_treated"  , (1-x$p1)*x$p2*(1-x$p9)*(1-x$p8)*x$p17*x$p20                            , NA       , x$c2      , NA       , NA        , x$c5  , x$c6   , x$c9,
+               "s3.b", "rna-"     , "ab+"     , "partly_treated" , (1-x$p1)*x$p2*(1-x$p9)*(1-x$p8)*x$p17*(1-x$p20)                        , NA       , x$c2      , NA       , NA        , x$c5  , x$c6   , x$c8,
+               "s3.b", "rna-"     , "ab+"     , "ltfu"           , (1-x$p1)*x$p2*(1-x$p9)*(1-x$p8)*(1-x$p17)                              , NA       , x$c2      , NA       , NA        , NA    , NA     , NA,
+               "s3.b", "rna-"     , "ab+"     , "test_neg"       , (1-x$p1)*x$p2*(1-x$p9)*x$p8                                            , NA       , x$c2      , NA       , NA        , NA    , NA     , NA,
+               "s3.b", "rna-"     , "ab+"     , "fully_treated"  , (1-x$p1)*x$p2*x$p9*x$p18*(1-x$p11)*x$p19*x$p20                         , NA       , x$c2      , NA       , x$c4      , x$c5  , 2*x$c6 , x$c9,
+               "s3.b", "rna-"     , "ab+"     , "partly_treated" , (1-x$p1)*x$p2*x$p9*x$p18*(1-x$p11)*x$p19*(1-x$p20)                     , NA       , x$c2      , NA       , x$c4      , x$c5  , 2*x$c6 , x$c8,
+               "s3.b", "rna-"     , "ab+"     , "ltfu"           , (1-x$p1)*x$p2*x$p9*x$p18*(1-x$p11)*(1-x$p19)                           , NA       , x$c2      , NA       , x$c4      , NA    , x$c6   , NA,
+               "s3.b", "rna-"     , "ab+"     , "test_neg"       , (1-x$p1)*x$p2*x$p9*x$p18*x$p11                                         , NA       , x$c2      , NA       , x$c4      , NA    , x$c6   , NA,
+               "s3.b", "rna-"     , "ab+"     , "ltfu"           , (1-x$p1)*x$p2*x$p9*(1-x$p18)                                           , NA       , x$c2      , NA       , NA        , NA    , NA     , NA,
+
+               "s3.b", "rna+"     , "ab+"     , "fully_treated"  , x$p1*(1-x$p9)*x$p7*x$p17*x$p20                                         , NA       , x$c2      , NA       , NA        , x$c5  , x$c6   , x$c9,
+               "s3.b", "rna+"     , "ab+"     , "partly_treated" , x$p1*(1-x$p9)*x$p7*x$p17*(1-x$p20)                                     , NA       , x$c2      , NA       , NA        , x$c5  , x$c6   , x$c8,
+               "s3.b", "rna+"     , "ab+"     , "ltfu"           , x$p1*(1-x$p9)*x$p7*(1-x$p17)                                           , NA       , x$c2      , NA       , NA        , NA    , NA     , NA,
+               "s3.b", "rna+"     , "ab+"     , "test_neg"       , x$p1*(1-x$p9)*(1-x$p7)                                                 , NA       , x$c2      , NA       , NA        , NA    , NA     , NA,
+               "s3.b", "rna+"     , "ab+"     , "fully_treated"  , x$p1*x$p9*x$p18*x$p10*x$p19*x$p20                                      , NA       , x$c2      , NA       , x$c4      , x$c5  , 2*x$c6 , x$c9,
+               "s3.b", "rna+"     , "ab+"     , "partly_treated" , x$p1*x$p9*x$p18*x$p10*x$p19*(1-x$p20)                                  , NA       , x$c2      , NA       , x$c4      , x$c5  , 2*x$c6 , x$c8,
+               "s3.b", "rna+"     , "ab+"     , "ltfu"           , x$p1*x$p9*x$p18*x$p10*(1-x$p19)                                        , NA       , x$c2      , NA       , x$c4      , NA    , x$c6   , NA,
+               "s3.b", "rna+"     , "ab+"     , "test_neg"       , x$p1*x$p9*x$p18*(1-x$p10)                                              , NA       , x$c2      , NA       , x$c4      , NA    , x$c6   , NA,
+               "s3.b", "rna+"     , "ab+"     , "ltfu"           , x$p1*x$p9*(1-x$p18)                                                    , NA       , x$c2      , NA       , NA        , NA    , NA     , NA
+) %>%
+  mutate(iter = list(as.character(1:nrow(x)))) %>% 
+  unnest(cols = c(exp_p, c_poc_ab, c_poc_rna, c_lab_ab, c_lab_rna, c_ass, c_vene, c_tx, iter)) %>%
+  mutate(c_tx = case_when(rna_status == "rna+" & outcome_status == "fully_treated" ~ NA, #Remove treatment costs for completely treated RNA pos
+                          TRUE ~ c_tx)) %>%
+  mutate(c_initiation = rowSums(across(c(c_poc_ab, c_poc_rna, c_lab_ab, c_lab_rna, c_ass, c_vene)), na.rm = TRUE),
+         c_completion = rowSums(across(c(c_poc_ab, c_poc_rna, c_lab_ab, c_lab_rna, c_ass, c_vene, c_tx)), na.rm = TRUE),
+         across(starts_with("c_"), ~exp_p*.x)) %>%
+  group_by(strat, iter) %>%
+  summarise(p_completion.rna_pos = sum(exp_p[outcome_status == "fully_treated" &
+                                         rna_status == "rna+"], na.rm = TRUE),
+            p_initiation.rna_pos = sum(exp_p[outcome_status %in% c("fully_treated",
+                                                             "partly_treated",
+                                                             "q_tx_ltfu",
+                                                             "q_tx_test_neg"
+                                                             ) &
+                                         rna_status == "rna+"], na.rm = TRUE),
+            p_completion.rna_neg = sum(exp_p[outcome_status == "fully_treated" &
+                                         rna_status == "rna-"], na.rm = TRUE),
+            p_initiation.rna_neg = sum(exp_p[outcome_status %in% c("fully_treated",
+                                                             "partly_treated",
+                                                             "q_tx_ltfu",
+                                                             "q_tx_test_neg"
+                                                             ) &
+                                         rna_status == "rna-"], na.rm = TRUE),
+            across(starts_with("c_"), list(total = ~sum(.x, na.rm = TRUE),
+                                           rna_neg = ~sum(.x[rna_status == "rna-"], na.rm = TRUE),
+                                           rna_pos_treated = ~sum(.x[rna_status == "rna+" &
+                                                                       outcome_status == "fully_treated"], na.rm = TRUE),
+                                           rna_pos_ltfu = ~sum(.x[rna_status == "rna+" &
+                                                                       outcome_status != "fully_treated"], na.rm = TRUE)),
+                   .names = "{.col}.{.fn}"),
+            .groups = "drop")
+}
+```
+
+```{r setup_params}
+#Define parameters
+base.params <- data.frame(
+  #Transition probabilities
+  p1 = 0.12,
+  p2 = 0.23,
+  p3 = 0.995,
+  p4 = 0.998,
+  p5 = 1,
+  p6 = 1,
+  p7 = 0.99,
+  p8 = 0.99,
+  p9 = 0.06,
+  p10 = 1,
+  p11 = 1,
+  p12 = 0.7,
+  p13 = 0.9,
+  p14 = 0.9,
+  p15 = 0.75,
+  p16 = 0.93,
+  p17 = 0.63,
+  p18 = 0.9,
+  p19 = 0.47,
+  p20 = 0.59,
+  
+  #Costs
+  c1 = 43.09,
+  c2 = 145.2,
+  c3 = 15.65,
+  c4 = 92.2,
+  c5 = 173.35,
+  c6 = 9.95,
+  c7 = 1125,
+  c8 = 5998,
+  c9 = 13495
+)
+
+#Setup parameters for PSA
+psa.params <- data.frame(
+
+  #Transition probabilities
+  p1 = rbeta(n_iter, 201, 1454),
+  p2 = rbeta(n_iter, 355, 1171),
+  p3 = rbeta(n_iter, 1000, 6),
+  p4 = rbeta(n_iter, 1000, 3),
+  p5 = rep(1, n_iter),
+  p6 = rep(1, n_iter),
+  p7 = rbeta(n_iter, 287.4, 3.9),
+  p8 = rbeta(n_iter, 160.2, 2.6),
+  p9 = rbeta(n_iter, 9.9 , 139.8),
+  p10 = rep(1, n_iter),
+  p11 = rep(1, n_iter),
+  p12 = rbeta(n_iter, 13938, 5978),
+  p13 = rbeta(n_iter, 57.1, 7.2),
+  p14 = rbeta(n_iter, 57.1, 7.2),
+  p15 = rbeta(n_iter, 12.8, 4.9),
+  p16 = rbeta(n_iter, 141, 11),
+  p17 = rbeta(n_iter, 45, 27),
+  p18 = rbeta(n_iter, 57.1, 7.2),
+  p19 = rbeta(n_iter, 6877, 7755),
+  p20 = rbeta(n_iter, 27, 19),
+  
+  #Costs
+  c1 = runif(n_iter, 43.09*0.8, 43.09*1.2),
+  c2 = runif(n_iter, 145.2*0.8, 145.2*1.2),
+  c3 = rep(15.65, n_iter),
+  c4 = rep(92.2, n_iter),
+  c5 = rep(173.35, n_iter),
+  c6 = runif(n_iter, 9.95*1, 9.95*1.5),
+  c7 = rep(1125, n_iter),
+  c8 = runif(n_iter, 5998*0.8, 5998*1.2),
+  c9 = rep(13495, n_iter)
+)
+
+#Set up parameters for deterministic sensitivity analysis
+det.params <- lapply(1:length(base.params), function(x){
+
+  params <- bind_rows(base.params,
+                      data.frame(
+                          #Transition probabilities
+                          p1 = binom.test(200, 1653)$conf.int[1:2],
+                          p2 = binom.test(354, 1524)$conf.int[1:2],
+                          p3 = c(0.989, 0.998),
+                          p4 = c(0.996, 0.999),
+                          p5 = c(1, 1),
+                          p6 = c(1, 1),
+                          p7 = c(0.97, 0.99),
+                          p8 = c(0.96, 1),
+                          p9 = c(0.03, 0.11),
+                          p10 = c(1, 1),
+                          p11 = c(1, 1),
+                          p12 = binom.test(13937, 19914)$conf.int[1:2],
+                          p13 = c(0.8, 0.95),
+                          p14 = c(0.8, 0.95),
+                          p15 = c(0.5, 0.9),
+                          p16 = binom.test(140, 150)$conf.int[1:2],
+                          p17 = binom.test(44, 70)$conf.int[1:2],
+                          p18 = c(0.8, 0.95),
+                          p19 = binom.test(6876, 14630)$conf.int[1:2],
+                          p20 = binom.test(26, 44)$conf.int[1:2],
+                          
+                          #Costs
+                          c1 = c(43.09*0.8, 43.09*1.2),
+                          c2 = c(145.2*0.8, 145.2*1.2),
+                          c3 = rep(15.65, 2),
+                          c4 = rep(92.2, 2),
+                          c5 = rep(173.35, 2),
+                          c6 = c(9.95*1, 9.95*1.5),
+                          c7 = rep(1125, 2),
+                          c8 = c(5998*0.8, 5998*1.2),
+                          c9 = rep(13495, 2)
+                        ) %>%
+                        mutate(across(!x, ~NA))) %>%
+    fill(everything())
+})
+  
+##Set values to be tested in scenario analyses 
+#Varying HCV prevalence
+rna_prev.h <- seq(0.1,0.5,0.1)
+ab_pos_in_rna_neg.h <- seq(0.1,0.4,0.1)
+rna_prev.l <- seq(0.02,0.1,0.02)
+ab_pos_in_rna_neg.l <- seq(0.05,0.25,0.05)
+
+#Alternative loss to follow up parameters for s2.b
+alt_ltfu_s2.b <- list(p14 = seq(0.8, 0.95, by = 0.05),
+                      p15 = seq(0.5, 0.9, by = 0.1))
+
+#Treatment costs
+treatment_costs <- data.frame(discount = rep(c("PBS", "Generic medication costs"), each = 3),
+                              param = rep(c("c7","c8","c9"), times = 2),
+                              value = c(3009,16050,36111,
+                                        12. ,64. ,145. ))
+
+##Generate parameter sets for scenario analyses
+sa_1.h.params <- expand_grid(rna_prev.h, ab_pos_in_rna_neg.h) %>%
+  bind_cols(bind_rows(lapply(1:nrow(.), function(x) return(base.params)))) %>%
+  mutate(p1 = rna_prev.h,
+         p2 = ab_pos_in_rna_neg.h)
+
+sa_1.l.params <- expand_grid(rna_prev.l, ab_pos_in_rna_neg.l) %>%
+  bind_cols(bind_rows(lapply(1:nrow(.), function(x) return(base.params)))) %>%
+  mutate(p1 = rna_prev.l,
+         p2 = ab_pos_in_rna_neg.l)
+
+sa_2.params <- expand_grid(alt_p14 = alt_ltfu_s2.b$p14, alt_p15 = alt_ltfu_s2.b$p15) %>%
+  bind_cols(bind_rows(lapply(1:nrow(.), function(x) return(base.params)))) %>%
+  mutate(p14 = alt_p14,
+         p15 = alt_p15)
+
+##Varying loss to follow up for all strategies
+#Set values for scale parameter to test
+a.values <- seq(0,10,0.001)
+
+sa_3.params <- list(s1.a = bind_rows(lapply(1:length(a.values), function(x) base.params)) %>%
+                      mutate(a = a.values,
+                             ltfu_base = 1 - p12*p19, #Define loss to follow up at point of RNA confirmation/treatment initiation
+                             across(c(p12, p19), ~case_when(.x * a > 1 ~ 1, #Scale parameters up to ceiling of 1
+                                                            TRUE ~ .x * a)),
+                             ltfu = 1 - p12*p19), #Calculate new loss to follow up with scaled parameters
+                    s1.b = bind_rows(lapply(1:length(a.values), function(x) base.params)) %>%
+                      mutate(a = a.values,
+                             ltfu_base = 1 - p19,
+                             p19 = case_when(p19 * a > 1 ~ 1,
+                                             TRUE ~ p19 * a),
+                             ltfu = 1 - p19),
+                    s1.c = bind_rows(lapply(1:length(a.values), function(x) base.params)) %>%
+                      mutate(a = a.values,
+                             ltfu_base = 1 - p19,
+                             p19 = case_when(p19 * a > 1 ~ 1,
+                                             TRUE ~ p19 * a),
+                             ltfu = 1 - p19), 
+                    s2.a = bind_rows(lapply(1:length(a.values), function(x) base.params)) %>%
+                      mutate(a = a.values,
+                             ltfu_base = 1 - p13*p19,
+                             across(c(p13, p19), ~case_when(.x * a > 1 ~ 1,
+                                                            TRUE ~ .x * a)),
+                             ltfu = 1 - p13*p19), 
+                    s2.b = bind_rows(lapply(1:length(a.values), function(x) base.params)) %>%
+                      mutate(a = a.values,
+                             ltfu_base = 1 - p14*p15,
+                             across(c(p14, p15), ~case_when(.x * a > 1 ~ 1,
+                                                            TRUE ~ .x * a)),
+                             ltfu = 1 - p14*p15), 
+                    s3.a = bind_rows(lapply(1:length(a.values), function(x) base.params)) %>%
+                      mutate(a = a.values,
+                             ltfu_base = 1 - (p16*(1-p9)*p17 + p16*p9*p18*p19),
+                             across(c(p16, p17, p18, p19), ~case_when(.x * a > 1 ~ 1,
+                                                                      TRUE ~ .x * a)),
+                             ltfu =  1 - (p16*(1-p9)*p17 + p16*p9*p18*p19)),
+                    s3.b = bind_rows(lapply(1:length(a.values), function(x) base.params)) %>%
+                      mutate(a = a.values,
+                             ltfu_base = 1 - ((1-p9)*p17 + p9*p18*p19),
+                             across(c(p17, p18, p19), ~case_when(.x * a > 1 ~ 1,
+                                                                 TRUE ~ .x * a)),
+                             ltfu =  1 - ((1-p9)*p17 + p9*p18*p19)))
+
+#Other observed ltfu before treatment uptake rates for comparison
+observed_ltfu <- tibble(source = c("ACCESS primary care clinics 2016-2022",
+                                   "National Australian Hepatitis C Point-of-Care Testing Program 2022 (prisons)",
+                                   "National Australian Hepatitis C Point-of-Care Testing Program 2022 (community settings)"),
+                        ltfu = c(0.45,
+                                 0.14,
+                                 0.63))
+
+#Round LTFU to nearest percentage point for faster processing/plotting
+sa_3.params <- lapply(sa_3.params, function(y) {
+  y <- y %>%
+    mutate(across(c(ltfu, ltfu_base), ~round(.x, 2))) %>%
+    group_by(ltfu) %>%
+    slice_min(a) %>%
+    ungroup()
+})
+
+sa_4.params <- bind_rows(base.params,
+                       bind_cols(
+                         bind_rows(
+                           lapply(1:2, function(x) return(base.params %>%
+                                                select(-c("c7","c8","c9"))))),
+                         treatment_costs %>% pivot_wider(names_from = "param"))) %>%
+  mutate(discount = replace_na(discount, "No discount"))
+```
+
+```{r run_model}
+##Generate model output tables
+#Base case
+out.base <- model(base.params)
+
+#Probabilistic
+out.psa <- model(psa.params)
+
+#Univariate deterministic sensitivity analyses
+out.det <- lapply(1:length(det.params), function(x) {model(det.params[[x]]) %>%
+                    mutate(.dir = case_match(iter,
+                          "1" ~  "base",
+                          "2" ~ "lower",
+                          "3" ~ "upper"),
+                          .value = rep(det.params[[x]][,x], 7))}
+)
+
+#Varying RNA and antibody prevalence
+out.sa_1.h <- model(sa_1.h.params) %>% left_join(sa_1.h.params %>%
+                                                       select(rna_prev.h, ab_pos_in_rna_neg.h) %>%
+                                                       rownames_to_column(), by = c("iter" = "rowname"))
+out.sa_1.l <- model(sa_1.l.params) %>% left_join(sa_1.l.params %>%
+                                                       select(rna_prev.l, ab_pos_in_rna_neg.l) %>%
+                                                       rownames_to_column(), by = c("iter" = "rowname"))
+
+#Varying loss to follow up parameters for S2.b
+out.sa_2 <- model(sa_2.params) %>% left_join(sa_2.params %>%
+                                                       select(alt_p14, alt_p15) %>%
+                                                       rownames_to_column(), by = c("iter" = "rowname"))
+
+#Medication costs are discounted by 50% or 75% compared to PBS listed prices, or equivalent to  estimated cost-based generic prices 
+out.sa_4 <- model(sa_4.params) %>% left_join(sa_4.params %>%
+                                                       select(discount) %>%
+                                                       rownames_to_column(), by = c("iter" = "rowname"))
+
+#Varying LTFU parameters
+out.sa_3 <- bind_rows(lapply(1:length(sa_3.params), function(x) {
+  model(sa_3.params[[x]]) %>% left_join(sa_3.params[[x]] %>%
+                                           rownames_to_column(), by = c("iter" = "rowname")) %>%
+                      filter(strat == names(sa_3.params)[x])
+}))
+```
+
+**Table 3.** Estimated cost-effectiveness of hepatitis C treatment initiation strategies for treatment-naive people who inject drugs (costs in 2023 AUD). Point estimates obtained under base-case assumptions and 95% uncertainty intervals from 1000 probabilistic draws. Abbreviations: Ab: antibody; Lab: laboratory; PoC: point-of-care; RNA: ribonucleic acid; Tx: treatment.
+```{r ce_output_table}
+##Get table and plots of cost-effectiveness results including uncertainty
+#Mean
+ce.dat.base <- out.base %>%
+  select(strat, p_completion.rna_pos, p_initiation.rna_pos, c_completion.total, c_initiation.total) %>%
+  mutate(est = "mean") %>%
+  pivot_longer(cols = where(is.numeric),
+               names_to = c("param", "endpoint"),
+               names_sep = 2) %>%
+  mutate(param = case_match(param, "p_" ~ "eff", "c_" ~ "cost"),
+         endpoint = str_extract(endpoint, "completion|initiation")) 
+
+ce.dat.base <- left_join(ce.dat.base %>%
+                      group_by(est, param, endpoint) %>%
+                      mutate(value = value - value[strat == "s1.a"]) %>% #Increment costs and effects to standard of care
+                      ungroup() %>%
+                      pivot_wider(names_from = "param",
+                        values_from = "value",
+                        names_prefix = "inc_") %>% 
+                      mutate(icer_s1.a = inc_cost/inc_eff),
+                    ce.dat.base %>%
+                      pivot_wider(names_from = "param", #Average costs and effects
+                      values_from = "value") %>%
+                      mutate(ce = cost/eff))
+#Calculate incremental net monetary benefit (INMB)
+wtp.base <- bind_rows(lapply(k, function(x){
+   out <- ce.dat.base %>%
+     mutate(nmb = inc_eff*x - inc_cost,
+            k = x) %>%
+     select(strat, endpoint, nmb, k)
+  return(out)
+}))
+#Get range for which each intervention is the cost-effective intervention according to NMB
+ce.dat.base <- wtp.base %>%
+  group_by(endpoint, k) %>%
+  slice_max(nmb, with_ties = FALSE) %>%
+  group_by(endpoint, strat) %>%
+  summarise(lwr = min(k), upr = max(k)) %>%
+  right_join(ce.dat.base) %>%
+  select(-est) %>%
+  ungroup()
+
+#Probabilistic
+ce.dat.prob <-  out.psa %>%
+  select(strat, iter, p_completion.rna_pos, p_initiation.rna_pos, c_completion.total, c_initiation.total) %>%
+  pivot_longer(cols = where(is.numeric),
+               names_to = c("param", "endpoint"),
+               names_sep = 2) %>%
+  mutate(param = case_match(param, "p_" ~ "eff", "c_" ~ "cost"),
+         endpoint = str_extract(endpoint, "completion|initiation")) 
+
+ce.dat.prob <- left_join(ce.dat.prob %>%
+                      group_by(iter, param, endpoint) %>%
+                      mutate(value = value - value[strat == "s1.a"]) %>% #Increment costs and effects to standard of care
+                      ungroup() %>%
+                      pivot_wider(names_from = "param",
+                        values_from = "value",
+                        names_prefix = "inc_") %>% 
+                      mutate(icer_s1.a = inc_cost/inc_eff),
+                    ce.dat.prob %>%
+                      pivot_wider(names_from = "param", #Average costs and effects
+                      values_from = "value") %>%
+                      mutate(ce = cost/eff))
+
+#Get NMB and expected loss across range of CE thresholds
+temp.dat <- ce.dat.prob %>% pivot_wider(names_from = strat,
+                                        values_from = c("inc_cost", "inc_eff"),
+                                        id_cols = c("iter", "endpoint"))
+
+wtp.prob <- bind_rows(apply(data.frame(k = rep(k, times = 2),
+                                  ep = rep(c("completion", "initiation"), each = length(k))),
+                       1,
+                       function(x){
+                         y = as.numeric(x["k"])
+                         z = as.character(x["ep"])
+  # Calculate incremental net monetary benefit (INMB)
+  nmb <- temp.dat %>%
+    filter(endpoint == z) %>%
+    select(starts_with("inc_eff"))*y - 
+    temp.dat %>% 
+    filter(endpoint == z) %>% 
+    select(starts_with("inc_cost"))
+  # Obtain intervention with highest INMB for each sample drawn with probabilistic sensitivity analysis
+  max.str <- max.col(nmb)
+  # Obtain intervention with highest expected INMB (i.e. average over all samples)
+  exp.nmb <- colMeans(nmb)
+  # Obtain number of times (samples) each intervention is cost-effective
+  n.ce <- left_join(data.frame(max.str = factor(1:ncol(nmb))),
+                    as.data.frame(table(max.str)),
+                    by = "max.str")[,2] %>% replace_na(0)
+  # Obtain proportion of times (samples) that each intervention is cost-effective
+  ceac <- n.ce/n_iter
+  #Identify the cost-effective intervention for the cost-effectiveness threshold value
+  ceaf <- which.max(colMeans(nmb))
+  # Compute net monetary loss for each intervention for each sample
+  loss <- nmb[cbind(1:n_iter, max.str)] - nmb
+  # Calculate expected net monetary loss for each intervention (i.e. average over all samples)
+  exp.loss <- colMeans(loss)
+
+  return(data.frame(k = rep(y, ncol(nmb)), endpoint = z, strat = str_split(colnames(nmb), "_", simplify = TRUE)[,3], exp.nmb, n.ce, ceac, exp.loss))
+})
+) %>%
+  group_by(k, endpoint) %>%
+  mutate(ceaf = max(ceac),
+         exp.loss.f = min(exp.loss)) %>%
+  ungroup()
+
+ce.dat.prob <- tibble(bind_rows(
+                        apply(expand_grid(unique(ce.dat.prob$strat), unique(ce.dat.prob$endpoint)), 1,
+                               function(x) {data.frame(ce.dat.prob %>%
+                                              filter(strat == x[1],
+                                                     endpoint == x[2]) %>%
+                                              select(where(is.numeric)) %>%
+                                              sapply(quantile, probs=c(0.025, 0.975), na.rm = TRUE)) %>%
+                                              rownames_to_column(var = "est") %>%
+                                              mutate(strat = x[1],
+                                                     endpoint = x[2])})))  %>%
+  pivot_wider(names_from = "est", values_from = where(is.numeric)) %>%
+  left_join(wtp.prob %>%
+    group_by(endpoint, k) %>%
+    slice_min(exp.loss, with_ties = FALSE) %>%
+    group_by(endpoint, strat) %>%
+    summarise(lwr_enl = min(k), upr_enl = max(k)))
+
+ce.tab <- left_join(ce.dat.base, ce.dat.prob) %>%
+  arrange(desc(endpoint), lwr, ce) %>%
+  ungroup()
+
+#Output table
+ce.tab %>%
+  mutate(across(matches("eff"), ~format_num(round(.x*1000,0))),
+         across(matches("cost"), ~format_cost(round(.x*1000,-2))),
+         across(matches("ce"), format_cost),
+         range_nmb = case_when(is.na(lwr) ~ "-",
+                           upr == max(k) ~ paste('$\\geq$', format_cost(lwr)),
+                           TRUE ~ paste(format_cost(lwr),"-",
+                                        format_cost(upr))),
+         range_enl = case_when(is.na(lwr) ~ "-",
+                           upr == max(k) ~ paste('$\\geq$', format_cost(lwr_enl)),
+                           TRUE ~ paste(format_cost(lwr_enl),"-",
+                                        format_cost(upr_enl))),
+         cost = paste0(cost, " (", `cost_2.5%`, " - ", `cost_97.5%`,")"),
+         eff = paste0(eff, " (", `eff_2.5%`, " - ", `eff_97.5%`,")"),
+         inc_cost = paste0(inc_cost, " (", `inc_cost_2.5%`, " - ", `inc_cost_97.5%`,")"),
+         inc_eff = paste0(inc_eff, " (", `inc_eff_2.5%`, " - ", `inc_eff_97.5%`,")"),
+         ce = paste0(ce, " (", `ce_2.5%`, " - ", `ce_97.5%`,")"),
+         icer_s1.a = paste0(icer_s1.a, " (", `icer_s1.a_2.5%`, " - ", `icer_s1.a_97.5%`,")"),
+         across(matches("inc|icer"), ~case_when(strat == "s1.a" ~ "-",
+                                                TRUE ~ .x)),
+         strat = format_strat(strat)) %>%
+  select(strat, cost, eff, ce, inc_cost, inc_eff, icer_s1.a, range_nmb, range_enl) %>%
+  kable(col.names = c("Strategy", "Cost per 1,000 screened", "Effects per 1,000 screened (completions or initiations)", "Cost-effectiveness ratio", "Cost per 1,000 screened", "Effects per 1,000 screened (completions or initiations)", "Cost-effectiveness ratio", "Maximises net monetary benefit", "Minimises expected net loss")) %>%
+  add_header_above(c(" " = 1, "Average" = 3, "Incremental to standard of care" = 3, "Willingness-to-pay per additional effect for which strategy:" = 2)) %>%
+  pack_rows("Treatment initiation", 1, 7) %>%
+  pack_rows("Treatment completion", 8, 14) %>%
+  kable_styling()
+```
+
+# Plots on the CE plane
+
+```{r ce_output_plots, fig.height=10, fig.width=7.5}
+##Completion
+plot.dat <- ce.tab %>%
+         filter(endpoint == "completion") %>%
+         mutate(strat = format_strat(strat))
+
+ce.plot1 <- ggplot(plot.dat, aes(color = strat, group = strat)) +
+  geom_point(aes(x = cost*1000, y = eff*1000)) +
+  geom_linerange(aes(xmin = `cost_2.5%`*1000, xmax = `cost_97.5%`*1000, y = eff*1000)) +
+  geom_linerange(aes(ymin = `eff_2.5%`*1000, ymax = `eff_97.5%`*1000, x = cost*1000)) +
+  scale_x_continuous(labels = format_cost, limits = c(0, max(plot.dat$`cost_97.5%`*1000))) +
+  scale_y_continuous(limits = c(0, max(plot.dat$`eff_97.5%`*1000))) +
+  labs(x = "Cost per 1,000 screened",
+       y = "N treated",
+       title = "Treatment completion") +
+  theme_c+
+  colScale
+
+##Initiation
+plot.dat <- ce.tab %>%
+         filter(endpoint == "initiation") %>%
+         mutate(strat = format_strat(strat))
+
+ce.plot2 <- ggplot(plot.dat, aes(color = strat, group = strat)) +
+  geom_point(aes(x = cost*1000, y = eff*1000)) +
+  geom_linerange(aes(xmin = `cost_2.5%`*1000, xmax = `cost_97.5%`*1000, y = eff*1000)) +
+  geom_linerange(aes(ymin = `eff_2.5%`*1000, ymax = `eff_97.5%`*1000, x = cost*1000)) +
+  scale_x_continuous(labels = format_cost, limits = c(0, max(plot.dat$`cost_97.5%`*1000))) +
+  scale_y_continuous(limits = c(0, max(plot.dat$`eff_97.5%`*1000))) +
+  labs(x = "Cost per 1,000 screened",
+       y = "N started treatment",
+       title = "Treatment initiation") +
+  theme_c+
+  colScale
+
+ggarrange(ce.plot2, ce.plot1, ncol = 1, common.legend = TRUE, legend = "bottom")
+```
+
+**Figure 3.** Estimated cost-effectiveness of hepatitis C treatment initiation strategies for treatment-naive people who inject drugs (costs in 2023 AUD). Point estimates obtained under base-case assumptions and 95% uncertainty intervals (error bars) from 1000 probabilistic draws. Abbreviations: Ab: antibody; Lab: laboratory; PoC: point-of-care; RNA: ribonucleic acid; Tx: treatment.
+
+```{r cost_plot, fig.height=7.5, fig.width=7.5}
+#Plot estimated costs by subcategory
+cost.dat <- out.base %>%
+  mutate(across(starts_with("c_"), list(tx_init = ~.x/p_initiation.rna_pos,
+                                        tx_comp = ~.x/p_completion.rna_pos),
+                .names = "{.col}.per_{.fn}")) %>%
+  select(strat, starts_with("c_")) %>%
+  pivot_longer(cols = !strat, names_to = c("cost_type", "subgroup","denom"), names_sep = "\\.") %>%
+  mutate(value = case_when(is.na(denom) ~ value*1000,
+                           TRUE ~ value),
+         denom = case_match(replace_na(denom, "per_screened"),
+                            "per_tx_init" ~ "Per treatment initiation",
+                            "per_tx_comp" ~ "Per treatment completion",
+                            "per_screened" ~ "Per 1,000 screened"),
+         strat = factor(format_strat(strat),
+                               levels = rev(levels(strats)[-4])))
+
+#Total costs
+plot.dat <- cost.dat %>% filter((cost_type == "c_initiation" & subgroup == "total") |
+                                  (subgroup != "total" & cost_type == "c_tx"),
+                                denom != "Per treatment initiation") %>%
+                          mutate(cost_type = format_costtype(cost_type),
+                                 subgroup = format_subgroup(subgroup),
+                                 cost_type = factor(case_match(paste(cost_type, subgroup),
+                                                                    "Treatment initiation Overall" ~ "Treatment initiation",
+                                                                    "Treatment Non-viraemic" ~ "Treatment \n(RNA-)",
+                                                                    "Treatment Viraemic (lost to follow-up)" ~ "Treatment (RNA+; \npartially treated)",
+                                                                    "Treatment Viraemic (fully treated)" ~ "Treatment (RNA+; \nfully treated)"),
+                                                         levels = c("Treatment \n(RNA-)",
+                                                                    "Treatment (RNA+; \npartially treated)",
+                                                                    "Treatment (RNA+; \nfully treated)",
+                                                                    "Treatment initiation"))) %>%
+                          filter(cost_type != "Treatment (RNA+; \nfully treated)")
+
+fills <- brewer.pal(length(levels(plot.dat$cost_type)),"RdBu")
+names(fills) <- levels(plot.dat$cost_type)
+
+cost.plot1 <- ggplot(plot.dat, aes(y = strat, x = value, fill = cost_type)) +
+  geom_bar(position = "stack", stat = "identity") +
+  scale_x_continuous(labels = format_cost, guide = guide_axis(angle = 20)) +
+  scale_fill_manual(name = "grp", values = fills)+
+  facet_wrap(~denom, scales = "free_x")+
+  guides(fill = guide_legend(reverse=TRUE)) +
+  labs(y = NULL,
+       x = "Cost",
+       title = "Treatment completion") +
+  theme_c
+
+#DIagnosis and assessment only
+plot.dat <- cost.dat %>% filter(cost_type != "c_initiation",
+                                cost_type != "c_completion",
+                                cost_type != "c_tx",
+                                subgroup == "total",
+                                denom != "Per treatment completion") %>%
+                          mutate(cost_type = fct_reorder(format_costtype_simple(cost_type),
+                                                         value,
+                                                         sum,
+                                                         .desc = TRUE))
+
+fills <- brewer.pal(length(levels(plot.dat$cost_type)),"PRGn")
+names(fills) <- levels(plot.dat$cost_type)
+
+cost.plot2 <- ggplot(plot.dat, aes(y = strat, x = value, fill = cost_type)) +
+  geom_bar(position = "stack", stat = "identity") +
+  scale_x_continuous(labels = format_cost, guide = guide_axis(angle = 20)) +
+  scale_fill_manual(name = "grp", values = fills) +
+  facet_wrap(~denom, scales = "free_x")+
+  guides(fill = guide_legend(reverse=TRUE)) +
+  labs(y = NULL,
+       x = "Cost",
+       title = "Treatment initiation") +
+  theme_c
+
+ggarrange(cost.plot2, cost.plot1, ncol = 1)
+```
+
+**Figure 4.** Estimated costs of hepatitis C treatment initiation strategies for treatment-naive people who inject drugs (2023 AUD). Top: overall costs (excluding costs of complete treatment for viraemic individuals). Bottom: costs of treatment initiation. Abbreviations: Ab: antibody; Lab: laboratory; PoC: point-of-care; RNA: ribonucleic acid; Tx: treatment.
+
+```{r base_analysis_nmb, fig.height=10, fig.width=7.5}
+#Output NMB plot for base-case (completion)
+plot.nmb.1 <- ggplot(wtp.base %>%
+         filter(endpoint == "completion",
+                k < max(ce.tab %>% #Limit plot area to WTP thresholds where strategies compete
+                          filter(endpoint == "completion") %>%
+                          select(lwr), na.rm = TRUE) *1.1) %>%
+         mutate(strat = format_strat(strat)), aes(x = k, y = nmb, colour = strat, group = strat)) +
+  geom_line(linewidth = 1, lineend = "square") +
+  scale_x_continuous(labels = format_cost) +
+  scale_y_continuous(labels = format_cost) +
+  labs(x = "Willingness to pay",
+       y = "Net monetary benefit",
+       title = "Treatment completion") +
+  theme_c+
+  colScale
+
+#initiation
+plot.nmb.2 <- ggplot(wtp.base %>% filter(endpoint == "initiation",
+                      k < max(ce.tab %>% #Limit plot area to WTP thresholds where strategies compete
+                          filter(endpoint == "initiation") %>%
+                          select(lwr), na.rm = TRUE) *1.1) %>%
+         mutate(strat = format_strat(strat)), aes(x = k, y = nmb, colour = strat, group = strat)) +
+  geom_line(linewidth = 1, lineend = "square") +
+  scale_x_continuous(labels = format_cost) +
+  scale_y_continuous(labels = format_cost) +
+  labs(x = "Willingness to pay",
+       y = "Net monetary benefit",
+       title = "Treatment initiation") +
+  theme_c+
+  colScale
+
+ggarrange(plot.nmb.2, plot.nmb.1, ncol = 1, common.legend = TRUE, legend = "bottom")
+```
+
+**Supplementary figure 2.** Estimated net monetary benefit (2023 AUD) of hepatitis C treatment initiation strategies by willingness to pay per additional treatment completion/initiation for treatment-naive people who inject drugs, under base-case assumptions. Abbreviations: Ab: antibody; Lab: laboratory; PoC: point-of-care; RNA: ribonucleic acid; Tx: treatment.
+
+```{r psa_enl, fig.height=10, fig.width=7.5}
+#Expected net loss curve (completion)
+plot.enl.1 <- ggplot(wtp.prob %>%
+         filter(endpoint == "completion",
+                k < max(ce.tab %>% #Limit plot area to WTP thresholds where strategies compete
+                          filter(endpoint == "completion") %>%
+                          select(lwr_enl), na.rm = TRUE) *1.1) %>%
+         mutate(strat = format_strat(strat)), aes(x = k, y = exp.loss, colour = strat, group = strat)) +
+  geom_line(linewidth = 1, lineend = "square") +
+  scale_x_continuous(labels = format_cost) +
+  scale_y_continuous(labels = format_cost) +
+  labs(x = "Willingness to pay",
+       y = "Expected net loss",
+       title = "Treatment completion") +
+  theme_c+
+  colScale
+
+#Expected net loss curve (initiation)
+plot.enl.2 <- ggplot(wtp.prob %>%
+         filter(endpoint == "initiation",
+                k < max(ce.tab %>% #Limit plot area to WTP thresholds where strategies compete
+                          filter(endpoint == "initiation") %>%
+                          select(lwr_enl), na.rm = TRUE) *1.1) %>%
+         mutate(strat = format_strat(strat)), aes(x = k, y = exp.loss, colour = strat, group = strat)) +
+  geom_line(linewidth = 1, lineend = "square") +
+  scale_x_continuous(labels = format_cost) +
+  scale_y_continuous(labels = format_cost) +
+  labs(x = "Willingness to pay",
+       y = "Expected net loss",
+       title = "Treatment initiation") +
+  theme_c+
+  colScale
+
+ggarrange(plot.enl.2, plot.enl.1, ncol = 1, common.legend = TRUE, legend = "bottom")
+```
+
+**Supplementary figure 3.** Expected net loss (loss resulting from choosing a strategy over the most cost-effective strategy, averaged over 1000 probabilistic iteration; 2023 AUD) of hepatitis C treatment initiation strategies by willingness to pay per additional treatment initiation/completion for treatment-naive people who inject drugs, under probabilistic assumptions. Abbreviations: Ab: antibody; Lab: laboratory; PoC: point-of-care; RNA: ribonucleic acid; Tx: treatment.
+
+```{r univariate_dsa_completion, fig.height=17.5, fig.width=10}
+#For each parameter generate sets of model outputs replacing base value with upper and lower limits, combine results into a dataframe
+ce.dat.det <- lapply(1:length(out.det), function(x) {
+  out <- out.det[[x]] %>%
+  select(strat, .dir, .value, p_completion.rna_pos, p_initiation.rna_pos, c_completion.total, c_initiation.total) %>%
+  pivot_longer(cols = -c("strat", ".dir", ".value"),
+               names_to = c("param", "endpoint"),
+               names_sep = 2) %>%
+  mutate(param = case_match(param, "p_" ~ "eff", "c_" ~ "cost"),
+         endpoint = str_extract(endpoint, "completion|initiation")) 
+
+  out <- left_join(out %>%
+                      group_by(endpoint, .dir, .value) %>%
+                      mutate(value = value - value[strat == "s1.a"]) %>% #Increment costs and effects to standard of care
+                      ungroup() %>%
+                      pivot_wider(names_from = "param",
+                        values_from = "value",
+                        names_prefix = "inc_") %>% 
+                      mutate(icer_s1.a = inc_cost/inc_eff),
+                    out %>%
+                      pivot_wider(names_from = "param", #Average costs and effects
+                      values_from = "value") %>%
+                      mutate(ce = cost/eff)) %>%
+    mutate(.param = names(base.params)[x])
+}) %>%
+  bind_rows() %>%
+  group_by(.param, endpoint, strat) %>% 
+  filter(var(ce) >= 0.00001) %>% #Remove parameters with no effect
+  ungroup() %>%
+  mutate(.param = format_param(.param),
+         strat = format_strat(strat)) %>%
+  arrange(strat, endpoint, .param)
+
+#Plot tornado diagrams
+plot.list =  apply(ce.dat.det %>%
+                     arrange(desc(endpoint)) %>%
+                     select(endpoint, strat) %>%
+                     unique(), 1, function(x){
+    tornado_diagram(ce.dat.det %>% filter(endpoint == x[1],
+                                   strat == x[2],
+                                   .dir != "base"),
+                ce,
+                ce.dat.det %>% filter(endpoint == x[1],
+                                   strat == x[2],
+                                   .dir == "base") %>%
+                  select(ce) %>% unique() %>% .$ce,
+                outcome_labeller = scales::dollar_format()) +
+    labs(y = paste("Average cost per treatment",x[1]),
+         x = NULL,
+         title = x[2]) +
+    scale_x_discrete(labels = function(x) str_wrap(x, width = 25))+
+    scale_fill_manual(values = c("orange", "black"),
+                      labels = c("Lower parameter limit", "Upper parameter limit"))+
+    theme_c
+})
+
+ggarrange(plotlist = plot.list[1:7], ncol = 2, nrow = 4, common.legend = TRUE, legend = "bottom")
+```
+
+**Supplementary figure 4.** Results of deterministic sensitivity analysis for estimated cost-effectiveness of hepatitis C treatment initiation strategies (2023 AUD) in achieving treatment initiation for treatment-naive people who inject drugs. Abbreviations: Ab: antibody; Lab: laboratory; PoC: point-of-care; RNA: ribonucleic acid; Tx: treatment.
+
+```{r univariate_dsa_initiation, fig.height=15, fig.width=10}
+ggarrange(plotlist = plot.list[8:14], ncol = 2, nrow = 4, common.legend = TRUE, legend = "bottom")
+```
+
+**Supplementary figure 5.** Results of deterministic sensitivity analysis for estimated cost-effectiveness of hepatitis C treatment initiation strategies (2023 AUD) in achieving treatment completion for treatment-naive people who inject drugs. Abbreviations: Ab: antibody; Lab: laboratory; PoC: point-of-care; RNA: ribonucleic acid; Tx: treatment.
+
+```{r scenario_1.h}
+#Arrange output of sensitivity analysis varying RNA prevalence (medium-high)
+ce.dat.sa_1.h <- out.sa_1.h %>%
+  select(strat, rna_prev.h, ab_pos_in_rna_neg.h, p_completion.rna_pos, p_initiation.rna_pos, c_completion.total, c_initiation.total) %>%
+  pivot_longer(cols = -c("strat", "rna_prev.h", "ab_pos_in_rna_neg.h"),
+               names_to = c("param", "endpoint"),
+               names_sep = 2) %>%
+  mutate(param = case_match(param, "p_" ~ "eff", "c_" ~ "cost"),
+         endpoint = str_extract(endpoint, "completion|initiation")) 
+
+ce.dat.sa_1.h <- left_join(ce.dat.sa_1.h %>%
+                      group_by(param, endpoint, rna_prev.h, ab_pos_in_rna_neg.h) %>%
+                      mutate(value = value - value[strat == "s1.a"]) %>% #Increment costs and effects to standard of care
+                      ungroup() %>%
+                      pivot_wider(names_from = "param",
+                        values_from = "value",
+                        names_prefix = "inc_") %>% 
+                      mutate(icer_s1.a = inc_cost/inc_eff),
+                    ce.dat.sa_1.h %>%
+                      pivot_wider(names_from = "param", #Average costs and effects
+                      values_from = "value") %>%
+                      mutate(ce = cost/eff))
+#Calculate incremental net monetary benefit (INMB)
+wtp.sa_1.h <- bind_rows(lapply(k, function(x){
+   out <- ce.dat.sa_1.h %>%
+     mutate(nmb = inc_eff*x - inc_cost,
+            k = x) %>%
+     select(strat, endpoint, nmb, k, rna_prev.h, ab_pos_in_rna_neg.h)
+  return(out)
+}))
+#Get range for which each intervention is the cost-effective intervention according to NMB
+ce.dat.sa_1.h <- wtp.sa_1.h %>%
+  group_by(endpoint, k, rna_prev.h, ab_pos_in_rna_neg.h) %>%
+  slice_max(nmb, with_ties = FALSE) %>%
+  group_by(endpoint, strat, rna_prev.h, ab_pos_in_rna_neg.h) %>%
+  summarise(lwr = min(k), upr = max(k)) %>%
+  right_join(ce.dat.sa_1.h) %>%
+  ungroup()
+```
+
+```{r scenario_1.h__completion_av_ce_plot, fig.height=10, fig.width=10}
+#Average CE plots
+av_ce_plots <- lapply(unique(ce.dat.sa_1.h$endpoint), function(x) {
+  
+  plot.dat <- ce.dat.sa_1.h %>%
+  filter(endpoint == x) %>%
+  mutate(strat = fct_reorder(format_strat(strat), ce))
+
+  plots <- lapply(split(plot.dat, ~rna_prev.h + ab_pos_in_rna_neg.h), function(x){
+  ggplot(x, aes(x = strat, y = ce, fill = strat))+
+  geom_col()+
+  labs(x = NULL, y = NULL, caption = paste0("p(RNA+) = ", unique(x$rna_prev.h), ",\n", "p(Ab+|RNA-) = ", unique(x$ab_pos_in_rna_neg.h)))+
+  scale_y_continuous(labels = format_cost,
+                     expand = expansion(mult = c(0, 0.025))) +
+  theme_c +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())+
+  fillScale
+}) 
+
+cplots <- ggarrange(plotlist = plots, common.legend = TRUE, legend = "bottom")
+annotate_figure(cplots, left = text_grob(paste("Average cost per treatment",x), rot =90))
+})
+
+av_ce_plots[[1]]
+```
+
+**Supplementary figure 6.** Estimated cost-effectiveness (2023 AUD) of hepatitis C treatment initiation strategies in achieving treatment completion for treatment-naive people who inject drugs, under varying prevalence (medium/high prevalence settings). Abbreviations: Ab: antibody; Lab: laboratory; PoC: point-of-care; RNA: ribonucleic acid; Tx: treatment.
+
+```{r scenario_1.h_completion_nmb_plot, fig.height=10, fig.width=10}
+#NMB plots
+ggplot(wtp.sa_1.h %>%
+         filter(endpoint == "completion",
+                k < max(ce.dat.sa_1.h %>% #Limit plot area to WTP thresholds where strategies compete
+                          filter(endpoint == "completion") %>%
+                          select(lwr), na.rm = TRUE) *1.1) %>%
+         mutate(strat = format_strat(strat)) %>%
+         group_by(k, rna_prev.h, ab_pos_in_rna_neg.h) %>%
+         slice_max(nmb) %>% #Keep only values on frontier
+         ungroup(),
+       aes(x = k, y = nmb, colour = strat, group = strat)) +
+  geom_line(linewidth = 1, lineend = "square") +
+  facet_grid(cols = vars(rna_prev.h),
+             rows = vars(ab_pos_in_rna_neg.h),
+             scales = "free_y") +
+  scale_x_continuous(labels = format_cost,
+                     guide = guide_axis(angle = 90),
+                     sec.axis = sec_axis(~ . , name = "RNA prevalence", breaks = NULL, labels = NULL)) +
+  scale_y_continuous(labels = format_cost,
+                     sec.axis = sec_axis(~ . , name = "Antibody prevalence in RNA-", breaks = NULL, labels = NULL)) +
+  labs(x = "Willingness to pay",
+       y = "Net monetary benefit") +
+  theme_c+
+  colScale
+```
+
+**Supplementary figure 7.** Estimated net monetary benefit (2023 AUD) of hepatitis C treatment initiation strategies by willingness to pay per additional treatment completion for treatment-naive people who inject drugs, under varying prevalence (medium/high prevalence settings). Only strategies on the net monetary benefit frontier are shown. Abbreviations: Ab: antibody; Lab: laboratory; PoC: point-of-care; RNA: ribonucleic acid; Tx: treatment.
+
+```{r scenario_1.l}
+#Arrange output of sensitivity analysis varying RNA prevalence (low)
+ce.dat.sa_1.l <- out.sa_1.l %>%
+  select(strat, rna_prev.l, ab_pos_in_rna_neg.l, p_completion.rna_pos, p_initiation.rna_pos, c_completion.total, c_initiation.total) %>%
+  pivot_longer(cols = -c("strat", "rna_prev.l", "ab_pos_in_rna_neg.l"),
+               names_to = c("param", "endpoint"),
+               names_sep = 2) %>%
+  mutate(param = case_match(param, "p_" ~ "eff", "c_" ~ "cost"),
+         endpoint = str_extract(endpoint, "completion|initiation")) 
+
+ce.dat.sa_1.l <- left_join(ce.dat.sa_1.l %>%
+                      group_by(param, endpoint, rna_prev.l, ab_pos_in_rna_neg.l) %>%
+                      mutate(value = value - value[strat == "s1.a"]) %>% #Increment costs and effects to standard of care
+                      ungroup() %>%
+                      pivot_wider(names_from = "param",
+                        values_from = "value",
+                        names_prefix = "inc_") %>% 
+                      mutate(icer_s1.a = inc_cost/inc_eff),
+                    ce.dat.sa_1.l %>%
+                      pivot_wider(names_from = "param", #Average costs and effects
+                      values_from = "value") %>%
+                      mutate(ce = cost/eff))
+#Calculate incremental net monetary benefit (INMB)
+wtp.sa_1.l <- bind_rows(lapply(k, function(x){
+   out <- ce.dat.sa_1.l %>%
+     mutate(nmb = inc_eff*x - inc_cost,
+            k = x) %>%
+     select(strat, endpoint, nmb, k, rna_prev.l, ab_pos_in_rna_neg.l)
+  return(out)
+}))
+#Get range for which each intervention is the cost-effective intervention according to NMB
+ce.dat.sa_1.l <- wtp.sa_1.l %>%
+  group_by(endpoint, k, rna_prev.l, ab_pos_in_rna_neg.l) %>%
+  slice_max(nmb, with_ties = FALSE) %>%
+  group_by(endpoint, strat, rna_prev.l, ab_pos_in_rna_neg.l) %>%
+  summarise(lwr = min(k), upr = max(k)) %>%
+  right_join(ce.dat.sa_1.l) %>%
+  ungroup()
+```
+
+```{r scenario_1.l__completion_av_ce_plot, fig.height=10, fig.width=10}
+#Average CE plots
+av_ce_plots <- lapply(unique(ce.dat.sa_1.l$endpoint), function(x) {
+  
+  plot.dat <- ce.dat.sa_1.l %>%
+  filter(endpoint == x) %>%
+  mutate(strat = fct_reorder(format_strat(strat), ce))
+
+  plots <- lapply(split(plot.dat, ~rna_prev.l + ab_pos_in_rna_neg.l), function(x){
+  ggplot(x, aes(x = strat, y = ce, fill = strat))+
+  geom_col()+
+  labs(x = NULL, y = NULL, caption = paste0("p(RNA+) = ", unique(x$rna_prev.l), ",\n", "p(Ab+|RNA-) = ", unique(x$ab_pos_in_rna_neg.l)))+
+  scale_y_continuous(labels = format_cost,
+                     expand = expansion(mult = c(0, 0.025))) +
+  theme_c +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())+
+  fillScale
+}) 
+
+cplots <- ggarrange(plotlist = plots, common.legend = TRUE, legend = "bottom")
+annotate_figure(cplots, left = text_grob(paste("Average cost per treatment",x), rot =90))
+})
+
+av_ce_plots[[1]]
+```
+
+**Supplementary figure 8.** Estimated cost-effectiveness (2023 AUD) of hepatitis C treatment initiation strategies in achieving treatment completion for treatment-naive people who inject drugs, under varying prevalence (low prevalence settings). Abbreviations: Ab: antibody; Lab: laboratory; PoC: point-of-care; RNA: ribonucleic acid; Tx: treatment.
+
+```{r scenario_1.l_completion_nmb_plot, fig.height=10, fig.width=10}
+#NMB plots
+ggplot(wtp.sa_1.l %>%
+         filter(endpoint == "completion",
+                k < max(ce.dat.sa_1.l %>% #Limit plot area to WTP thresholds where strategies compete
+                          filter(endpoint == "completion") %>%
+                          select(lwr), na.rm = TRUE) *1.1) %>%
+         mutate(strat = format_strat(strat)) %>%
+         group_by(k, rna_prev.l, ab_pos_in_rna_neg.l) %>%
+         slice_max(nmb) %>% #Keep only values on frontier
+         ungroup(),
+       aes(x = k, y = nmb, colour = strat, group = strat)) +
+  geom_line(linewidth = 1, lineend = "square") +
+  facet_grid(cols = vars(rna_prev.l),
+             rows = vars(ab_pos_in_rna_neg.l),
+             scales = "free_y") +
+  scale_x_continuous(labels = format_cost,
+                     guide = guide_axis(angle = 90),
+                     sec.axis = sec_axis(~ . , name = "RNA prevalence", breaks = NULL, labels = NULL)) +
+  scale_y_continuous(labels = format_cost,
+                     sec.axis = sec_axis(~ . , name = "Antibody prevalence in RNA-", breaks = NULL, labels = NULL)) +
+  labs(x = "Willingness to pay",
+       y = "Net monetary benefit") +
+  theme_c+
+  colScale
+```
+
+**Supplementary figure 9.** Estimated net monetary benefit (2023 AUD) of hepatitis C treatment initiation strategies by willingness to pay per additional treatment completion for treatment-naive people who inject drugs, under varying prevalence (low prevalence settings). Only strategies on the net monetary benefit frontier are shown. Abbreviations: Ab: antibody; Lab: laboratory; PoC: point-of-care; RNA: ribonucleic acid; Tx: treatment.
+
+```{r scenario_2}
+#Estimate average cost per additional HCV viraemic individual completing treatment, varying loss to follow up parameters for S2.b.
+ce.dat.sa_2 <- out.sa_2 %>%
+  select(strat, alt_p14, alt_p15, p_completion.rna_pos, p_initiation.rna_pos, c_completion.total, c_initiation.total) %>%
+  pivot_longer(cols = -c("strat", "alt_p14", "alt_p15"),
+               names_to = c("param", "endpoint"),
+               names_sep = 2) %>%
+  mutate(param = case_match(param, "p_" ~ "eff", "c_" ~ "cost"),
+         endpoint = str_extract(endpoint, "completion|initiation")) 
+
+ce.dat.sa_2 <- left_join(ce.dat.sa_2 %>%
+                      group_by(param, endpoint, alt_p14, alt_p15) %>%
+                      mutate(value = value - value[strat == "s1.a"]) %>% #Increment costs and effects to standard of care
+                      ungroup() %>%
+                      pivot_wider(names_from = "param",
+                        values_from = "value",
+                        names_prefix = "inc_") %>% 
+                      mutate(icer_s1.a = inc_cost/inc_eff),
+                    ce.dat.sa_2 %>%
+                      pivot_wider(names_from = "param", #Average costs and effects
+                      values_from = "value") %>%
+                      mutate(ce = cost/eff))
+# Calculate incremental net monetary benefit (INMB)
+wtp.sa_2 <- bind_rows(lapply(k, function(x){
+   out <- ce.dat.sa_2 %>%
+     mutate(nmb = inc_eff*x - inc_cost,
+            k = x)
+  return(out)
+})) %>%
+  group_by(alt_p14, alt_p15, endpoint, k) %>%
+  mutate(frontier_nmb = max(nmb)) 
+
+wtp.sa_2 <- wtp.sa_2 %>% select(-c("cost", "eff", "ce", "nmb", "strat")) %>%
+  pivot_longer("frontier_nmb", names_to = "strat", values_to = "nmb") %>%
+  distinct() %>%
+  bind_rows(wtp.sa_2) %>%
+  ungroup()
+
+#Get range for which each intervention is the. cost-effective intervention according to NMB, by loss to follow up
+ce.dat.sa_2 <- wtp.sa_2 %>%
+  filter(strat != "frontier_nmb") %>%
+  group_by(endpoint, alt_p14, alt_p15, k) %>%
+  slice_max(nmb, with_ties = FALSE) %>%
+  group_by(endpoint, alt_p14, alt_p15, strat) %>%
+  summarise(lwr = min(k), upr = max(k)) %>%
+  right_join(ce.dat.sa_2) %>%
+  arrange(endpoint, alt_p14, alt_p15, lwr, ce) %>%
+  ungroup()
+```
+
+```{r scenario_2_av_ce, fig.height=5, fig.width=10}
+#Average CE plots for optimistic and pessimistic scenarios
+plot.dat <- ce.dat.sa_2 %>%
+  filter((alt_p14 == max(alt_ltfu_s2.b$p14) & alt_p15 == max(alt_ltfu_s2.b$p15)) |
+           (alt_p14 == min(alt_ltfu_s2.b$p14) & alt_p15 == min(alt_ltfu_s2.b$p15)) |
+            (alt_p14 == base.params$p14 & alt_p15 == base.params$p15)) %>%
+  group_by(endpoint, strat) %>%
+  summarise(optim_ce = min(ce),
+            pessim_ce = max(ce)) %>%
+  left_join(ce.dat.base %>% select(endpoint, strat, ce)) %>%
+  mutate(strat = fct_reorder(factor(format_strat(strat)), ce),
+         across(c("optim_ce", "pessim_ce"), ~case_when(.x == ce ~ NA_integer_,
+                                                                  TRUE ~ .x)))
+
+ggplot(plot.dat, aes(x = strat, y = ce, fill = strat)) +
+  geom_col()+
+  geom_errorbar(aes(x = strat, ymin = optim_ce, ymax = pessim_ce))+
+  scale_y_continuous(labels = format_cost,
+                     expand = expansion(mult = c(0, 0.025))) +
+  theme_c +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())+
+  fillScale +
+  facet_wrap(~endpoint,
+             scales = "free_y")+
+  labs(x = NULL, y = "Average cost per treatment")
+```
+
+**Supplementary figure 10.** Estimated cost-effectiveness (2023 AUD) of a *point-of-care antibody/laboratory RNA/early treatment* hepatitis C treatment initiation strategy in achieving treatment completion/initiation for treatment-naive people who inject drugs under optimistic and pessimistic loss to follow up assumptions (error bars). Estimates for other strategies under base-case assumptions shown for comparison. Abbreviations: Ab: antibody; Lab: laboratory; PoC: point-of-care; RNA: ribonucleic acid; Tx: treatment.
+
+```{r scenario_2_nmb_completion, fig.height=10, fig.width=10}
+ggplot(wtp.sa_2 %>% filter(endpoint == "completion",
+                      strat %in% c("s2.b", "frontier_nmb"),
+                      k < max(ce.dat.sa_2 %>% #Limit plot area to WTP thresholds where strategies compete
+                          filter(endpoint == "completion") %>%
+                          select(lwr), na.rm = TRUE) *1.1) %>%
+         mutate(strat = format_strat(strat)), 
+       aes(x = k, y = nmb, colour = strat, group = strat)) +
+  geom_line(linewidth = 1, lineend = "square") +
+  facet_grid(cols = vars(alt_p14),
+             rows = vars(alt_p15),
+             scales = "free_y") +
+  scale_x_continuous(labels = format_cost,
+                     guide = guide_axis(angle = 90),
+                     sec.axis = sec_axis(~ . , name = format_param("p14"), breaks = NULL, labels = NULL)) +
+  scale_y_continuous(labels = format_cost,
+                     sec.axis = sec_axis(~ . , name = format_param("p15"), breaks = NULL, labels = NULL)) +
+  labs(x = "Willingness to pay",
+       y = "Net monetary benefit") +
+  theme_c+
+  colScale
+```
+
+**Supplementary figure 11.** Estimated net monetary benefit (2023 AUD) of a *point-of-care antibody/laboratory RNA/early treatment* hepatitis C treatment initiation strategy under varying loss to follow up assumptions, and the net monetary benefit frontier presented by competing strategies, by willingness to pay per additional treatment completion for treatment-naive people who inject drugs. Abbreviations: Ab: antibody; Lab: laboratory; PoC: point-of-care; RNA: ribonucleic acid; Tx: treatment.
+
+```{r scenario_3}
+#Vary LTFU for all strategies and estimate points at which cost per outcome are equal
+ce.dat.sa_3 <- out.sa_3 %>%
+  mutate(p_initiation.rna_pos = p_completion.rna_pos) %>% #Change initiation outcome to completion without medication costs
+  select(strat, ltfu_base, ltfu, p_completion.rna_pos, p_initiation.rna_pos, c_completion.total, c_initiation.total) %>%
+  pivot_longer(cols = -c(strat, ltfu_base, ltfu),
+               names_to = c("param", "endpoint"),
+               names_sep = 2) %>%
+  mutate(param = case_match(param, "p_" ~ "eff", "c_" ~ "cost"),
+         endpoint = str_extract(endpoint, "completion|initiation")) %>%
+                      pivot_wider(names_from = "param",
+                      values_from = "value")
+
+comparisons <- tibble(base = combn(unique(out.sa_3$strat), 2)[1,],
+                       comp = combn(unique(out.sa_3$strat), 2)[2,])
+
+comp.dat <- comparisons %>%
+  full_join(ce.dat.sa_3, by = c("base" = "strat"), relationship = "many-to-many") %>%
+  full_join(ce.dat.sa_3, by = c("comp" = "strat", "endpoint"), suffix = c(".base", ".comp"), relationship = "many-to-many") %>%
+  distinct(base, comp, endpoint, ltfu.base, ltfu.comp, .keep_all = TRUE) %>%
+  filter(if_all(c(comp, base, cost.base, cost.comp, eff.base, eff.comp), ~!is.na(.x))) %>%
+  mutate(ce_base = cost.base / eff.base,
+         ce_comp = cost.comp / eff.comp,
+         ce_diff = ce_base - ce_comp,
+         ce_diff_bin = case_when(ce_diff >= 0~ "Lower for strategy on y-axis",
+                                 ce_diff <0 ~ "Lower for strategy on x-axis"),
+         inc_eff = eff.base - eff.comp,
+         inc_cost = cost.base - cost.comp,
+         icer = inc_cost/inc_eff)
+```
+
+```{r scenario_3_completion, fig.height=13, fig.width=19}
+#Plot effects of varying LTFU on cost per completion
+ltfu_plots <- apply(comparisons, 1, function(x){
+  plot.dat <- comp.dat %>% filter(endpoint == "completion",
+                             base == x[1], comp == x[2])
+
+  points <- tibble(x = unique(plot.dat$ltfu_base.base),
+                 y = unique(plot.dat$ltfu_base.comp), source = "Model estimate") %>%
+    bind_rows(observed_ltfu %>% mutate(x = ltfu, y = ltfu)) %>%
+    mutate(source = fct_inorder(factor(source)))
+  
+  ggplot(plot.dat, aes(x = ltfu.base, y = ltfu.comp, fill = ce_diff_bin)) +
+    geom_tile() +
+    geom_segment(data = points, aes(x = x, xend = x, y = Inf, yend = -Inf, colour = source), linetype = "dashed", inherit.aes = FALSE) +
+    geom_segment(data = points, aes(x = Inf,xend = -Inf, y = y, yend = y, colour = source), linetype = "dashed", inherit.aes = FALSE) +
+    geom_point(data = points %>% filter(source == "Model estimate"), aes(x = x, y = y, colour = source), size = 3, inherit.aes = FALSE) +
+    scale_x_continuous(breaks = c(0, 0.25,0.5,0.75, 1), labels = scales::percent, expand = c(0,0)) +
+    scale_y_continuous(breaks = c(0, 0.25,0.5,0.75, 1), labels = scales::percent, expand = c(0,0)) +
+    scale_fill_brewer(type = "div", na.translate = FALSE, palette = "Greys") +
+    scale_color_brewer(palette = "Dark2") +
+    labs(x = case_when(paste(x[1], x[2]) %in% paste(comparisons$base, comparisons$comp)[c(1:5, 7:10, 12:14, 16:17, 19)] ~"",
+         TRUE ~ format_strat(x[1])),
+        y = case_when(paste(x[1], x[2]) %in% paste(comparisons$base, comparisons$comp)[c(7:21)] ~"",
+         TRUE ~ format_strat(x[2]))) +
+    theme(legend.background = element_blank(), 
+            legend.key = element_blank(), panel.background = element_blank(), 
+            panel.border = element_blank(), strip.background = element_blank(), 
+            plot.background = element_blank(), legend.title = element_blank())
+})
+
+blank.plot <- ggplot() + theme_void()
+leg <- blank.plot + 
+  annotation_custom(g_legend(ltfu_plots[[1]]))
+
+plot.list <- list(ltfu_plots[[1]], blank.plot, blank.plot, blank.plot, blank.plot, blank.plot,
+                  ltfu_plots[[2]], ltfu_plots[[7]], blank.plot, blank.plot, leg, blank.plot,
+                  ltfu_plots[[3]], ltfu_plots[[8]], ltfu_plots[[12]], blank.plot, blank.plot, blank.plot,
+                  ltfu_plots[[4]], ltfu_plots[[9]], ltfu_plots[[13]], ltfu_plots[[16]], blank.plot, blank.plot,
+                  ltfu_plots[[5]], ltfu_plots[[10]], ltfu_plots[[14]], ltfu_plots[[17]], ltfu_plots[[19]], blank.plot,
+                  ltfu_plots[[6]], ltfu_plots[[11]], ltfu_plots[[15]], ltfu_plots[[18]], ltfu_plots[[20]], ltfu_plots[[21]])
+
+ggarrange(plotlist = plot.list, ncol = 6, nrow = 6, common.legend = TRUE, legend = "none")
+```
+
+**Supplementary figure 12.** Effect of varying loss to follow-up prior to RNA-confirmed treatment initiation (axes) on relative cost per treatment completion of hepatitis C treatment initiation strategies for treatment-naive people who inject drugs. Dashed lines show assumed loss-to-follow up in the base-case and reported values in Australian Collaboration for Coordinated Enhanced Sentinel Surveillance of Sexually Transmissible Infections and Blood Borne Viruses (ACCESS) primary care clinics (REF) and National Australian Hepatitis C Point-of-Care Testing Program (REF). Abbreviations: Ab: antibody; Lab: laboratory; PoC: point-of-care; RNA: ribonucleic acid; Tx: treatment.
+```{r scenario_3_initiation, fig.height=13, fig.width=19}
+#Plot effects of varying LTFU on cost per completion - excluding medication costs
+ltfu_plots <- apply(comparisons, 1, function(x){
+  plot.dat <- comp.dat %>% filter(endpoint == "initiation",
+                             base == x[1], comp == x[2])
+
+  points <- tibble(x = unique(plot.dat$ltfu_base.base),
+                 y = unique(plot.dat$ltfu_base.comp), source = "Model estimate") %>%
+    bind_rows(observed_ltfu %>% mutate(x = ltfu, y = ltfu)) %>%
+    mutate(source = fct_inorder(factor(source)))
+  
+  ggplot(plot.dat, aes(x = ltfu.base, y = ltfu.comp, fill = ce_diff_bin)) +
+    geom_tile() +
+    geom_segment(data = points, aes(x = x, xend = x, y = Inf, yend = -Inf, colour = source), linetype = "dashed", inherit.aes = FALSE) +
+    geom_segment(data = points, aes(x = Inf,xend = -Inf, y = y, yend = y, colour = source), linetype = "dashed", inherit.aes = FALSE) +
+    geom_point(data = points %>% filter(source == "Model estimate"), aes(x = x, y = y, colour = source), size = 3, inherit.aes = FALSE) +
+    scale_x_continuous(breaks = c(0, 0.25,0.5,0.75, 1), labels = scales::percent, expand = c(0,0)) +
+    scale_y_continuous(breaks = c(0, 0.25,0.5,0.75, 1), labels = scales::percent, expand = c(0,0)) +
+    scale_fill_brewer(type = "div", na.translate = FALSE, palette = "Greys") +
+    scale_color_brewer(palette = "Dark2") +
+    labs(x = case_when(paste(x[1], x[2]) %in% paste(comparisons$base, comparisons$comp)[c(1:5, 7:10, 12:14, 16:17, 19)] ~"",
+         TRUE ~ format_strat(x[1])),
+        y = case_when(paste(x[1], x[2]) %in% paste(comparisons$base, comparisons$comp)[c(7:21)] ~"",
+         TRUE ~ format_strat(x[2]))) +
+    theme(legend.background = element_blank(), 
+            legend.key = element_blank(), panel.background = element_blank(), 
+            panel.border = element_blank(), strip.background = element_blank(), 
+            plot.background = element_blank(), legend.title = element_blank())
+})
+
+blank.plot <- ggplot() + theme_void()
+leg <- blank.plot + 
+  annotation_custom(g_legend(ltfu_plots[[1]]))
+
+plot.list <- list(ltfu_plots[[1]], blank.plot, blank.plot, blank.plot, blank.plot, blank.plot,
+                  ltfu_plots[[2]], ltfu_plots[[7]], blank.plot, blank.plot, leg, blank.plot,
+                  ltfu_plots[[3]], ltfu_plots[[8]], ltfu_plots[[12]], blank.plot, blank.plot, blank.plot,
+                  ltfu_plots[[4]], ltfu_plots[[9]], ltfu_plots[[13]], ltfu_plots[[16]], blank.plot, blank.plot,
+                  ltfu_plots[[5]], ltfu_plots[[10]], ltfu_plots[[14]], ltfu_plots[[17]], ltfu_plots[[19]], blank.plot,
+                  ltfu_plots[[6]], ltfu_plots[[11]], ltfu_plots[[15]], ltfu_plots[[18]], ltfu_plots[[20]], ltfu_plots[[21]])
+
+ggarrange(plotlist = plot.list, ncol = 6, nrow = 6, common.legend = TRUE, legend = "none")
+
+#Get changes in LTFU required to achieve equal cost per outcome
+#Change in base LTFU
+comp.dat %>%
+  filter(ltfu.comp == ltfu_base.comp) %>%
+  group_by(endpoint, base, comp) %>%
+  slice_min(abs(ce_diff), na_rm = TRUE) %>%
+  mutate(delta_ltfu.base = ltfu.base - ltfu_base.base) %>%
+  select(ltfu_base.base, ltfu.base, delta_ltfu.base, ltfu.comp, ce_diff) %>%
+  filter(base %in% c("s1.a", "s1.b", "s2.b", "s3.b"),
+         comp %in% c("s1.a", "s1.b", "s2.b", "s3.b"))
+
+#Change in comp LTFU
+comp.dat %>%
+  filter(ltfu.base == ltfu_base.base) %>%
+  group_by(endpoint, base, comp) %>%
+  slice_min(abs(ce_diff), na_rm = TRUE) %>%
+  mutate(delta_ltfu.comp = ltfu.comp - ltfu_base.comp) %>%
+  select(ltfu_base.comp, ltfu.comp, delta_ltfu.comp, ltfu.base, ce_diff) %>%
+  filter(base %in% c("s1.a", "s1.b", "s2.b", "s3.b"),
+         comp %in% c("s1.a", "s1.b", "s2.b", "s3.b"))
+```
+
+**Supplementary figure 13.** Effect of varying loss to follow-up prior to RNA-confirmed treatment initiation (axes) on relative cost per treatment completion of hepatitis C treatment initiation strategies (ignoring medication costs) for treatment-naive people who inject drugs. Dashed lines show assumed loss-to-follow up in the base-case and reported values in Australian Collaboration for Coordinated Enhanced Sentinel Surveillance of Sexually Transmissible Infections and Blood Borne Viruses (ACCESS) primary care clinics (REF) and National Australian Hepatitis C Point-of-Care Testing Program (REF). Abbreviations: Ab: antibody; Lab: laboratory; PoC: point-of-care; RNA: ribonucleic acid; Tx: treatment.
+
+**Supplementary table 1.** Estimated cost-effectiveness of hepatitis C treatment initiation strategies for treatment-naive people who inject drugs under varying treatment costs (costs in 2023 AUD). Abbreviations: Ab: antibody; Lab: laboratory; PoC: point-of-care; RNA: ribonucleic acid; Tx: treatment.
+
+```{r scenario_4}
+#Estimate average cost per additional HCV viraemic individual completing treatment, assuming medication costs are discounted by 50% or 75% compared to PBS listed prices, or equivalent to  estimated cost-based generic prices 
+#Run model varying RNA and antibody prevalence
+ce.dat.sa_4 <- out.sa_4 %>%
+  select(strat, discount, p_completion.rna_pos, p_initiation.rna_pos, c_completion.total, c_initiation.total) %>%
+  pivot_longer(cols = -c("strat", "discount"),
+               names_to = c("param", "endpoint"),
+               names_sep = 2) %>%
+  mutate(param = case_match(param, "p_" ~ "eff", "c_" ~ "cost"),
+         endpoint = str_extract(endpoint, "completion|initiation")) 
+
+ce.dat.sa_4 <- left_join(ce.dat.sa_4 %>%
+                      group_by(param, endpoint, discount) %>%
+                      mutate(value = value - value[strat == "s1.a"]) %>% #Increment costs and effects to standard of care
+                      ungroup() %>%
+                      pivot_wider(names_from = "param",
+                        values_from = "value",
+                        names_prefix = "inc_") %>% 
+                      mutate(icer_s1.a = inc_cost/inc_eff),
+                    ce.dat.sa_4 %>%
+                      pivot_wider(names_from = "param", #Average costs and effects
+                      values_from = "value") %>%
+                      mutate(ce = cost/eff)) %>%
+  mutate(discount = fct_reorder(discount, cost, sum, .desc = TRUE))
+
+#Calculate incremental net monetary benefit (INMB)
+wtp.sa_4 <- bind_rows(lapply(k, function(x){
+   out <- ce.dat.sa_4 %>%
+     mutate(nmb = inc_eff*x - inc_cost,
+            k = x) %>%
+     select(strat, endpoint, nmb, k, discount)
+  return(out)
+}))
+#Get range for which each intervention is the cost-effective intervention according to NMB
+ce.dat.sa_4 <- wtp.sa_4 %>%
+  group_by(endpoint, k, discount) %>%
+  slice_max(nmb, with_ties = FALSE) %>%
+  group_by(endpoint, strat, discount) %>%
+  summarise(lwr = min(k), upr = max(k)) %>%
+  right_join(ce.dat.sa_4) %>%
+  ungroup() %>%
+  filter(endpoint == "completion") %>%
+  arrange(discount, lwr, ce)
+
+ce.dat.sa_4 %>%
+  mutate(across(matches("eff"), ~format_num(round(.x*1000,0))),
+         across(matches("cost"), ~format_cost(round(.x*1000,-2))),
+         across(matches("ce"), format_cost),
+         range_nmb = case_when(is.na(lwr) ~ "-",
+                           upr == max(k) ~ paste('$\\geq$', format_cost(lwr)),
+                           TRUE ~ paste(format_cost(lwr),"-",
+                                        format_cost(upr))),
+         across(matches("inc|icer"), ~case_when(strat == "s1.a" ~ "-",
+                                                TRUE ~ .x)),
+         strat = format_strat(strat)) %>%
+  select(strat, cost, eff, ce, inc_cost, inc_eff, icer_s1.a, range_nmb) %>%
+  kable(col.names = c("Strategy", "Cost per 1,000 screened", "Completions per 1,000 screened", "Cost-effectiveness ratio", "Cost per 1,000 screened", "Completions per 1,000 screened", "Cost-effectiveness ratio", "Willingness-to-pay per additional effect for which strategy maximises net monetary benefit")) %>%
+  add_header_above(c(" " = 1, "Average" = 3, "Incremental to standard of care" = 3, " " = 1)) %>%
+  pack_rows(paste0("Pharmaceutical Benefits Scheme (",sa_4.params %>% filter(discount == "PBS") %>% pull(c9) %>% format_cost()," per course)"), 1, 7) %>%
+  pack_rows(paste0("Base-case (",sa_4.params %>% filter(discount == "No discount") %>% pull(c9) %>% format_cost()," per course)"), 8, 14) %>%
+  pack_rows(paste0("Generic (",sa_4.params %>% filter(discount == "Generic medication costs") %>% pull(c9) %>% format_cost()," per course)"), 15, 21) %>%
+  kable_styling()
+```
